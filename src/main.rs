@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use clap::Parser;
 use serenity::{
     builder::{CreateEmbed, CreateSelectMenuOption},
@@ -121,7 +123,8 @@ impl Handler {
                 .map(|line| {
                     if comp.data.values.iter().any(|v| *v == line) {
                         if let Some((i, task)) = line.split_once(". ") {
-                            format!("{i}. ~~{task}~~ completed by <@{}>", comp.user.id)
+                            let now_unix = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+                            format!("{i}. ~~{task}~~ completed by <@{}> at <t:{now_unix}> (<t:{now_unix}:R>)", comp.user.id)
                         } else {
                             line.to_string()
                         }
