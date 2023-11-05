@@ -1,0 +1,2 @@
+# perms: send messages, send messages in threads
+https://discord.com/api/oauth2/authorize?client_id=1170744344559497357&permissions=274877908992&scope=bot%20applications.commands
