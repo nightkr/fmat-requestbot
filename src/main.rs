@@ -104,6 +104,15 @@ impl Handler {
         cmd.create_interaction_response(&ctx.http, |r| rendered.create_interaction_response(r))
             .await
             .unwrap();
+
+        let response_message = cmd.get_interaction_response(&ctx.http).await.unwrap();
+        request::ActiveModel {
+            discord_message_id: Set(Some(response_message.id.0 as i64)),
+            ..request.into()
+        }
+        .update(&self.db)
+        .await
+        .unwrap();
     }
 
     async fn complete_request_task(
