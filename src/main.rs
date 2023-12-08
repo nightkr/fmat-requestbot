@@ -1,16 +1,24 @@
-use std::time::SystemTime;
-
 use clap::Parser;
+use entity::{request, task, user};
+use migration::MigratorTrait;
+use sea_orm::{
+    prelude::Uuid, sea_query::OnConflict, ActiveModelTrait, ActiveValue::Set, ColumnTrait,
+    Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter, QueryOrder,
+};
 use serenity::{
-    builder::{CreateEmbed, CreateSelectMenuOption},
+    builder::{CreateComponents, CreateEmbed, CreateInteractionResponse},
     model::{
         application::interaction::message_component::MessageComponentInteraction,
-        prelude::interaction::{application_command::ApplicationCommandInteraction, Interaction},
+        prelude::{
+            interaction::{application_command::ApplicationCommandInteraction, Interaction},
+            UserId,
+        },
     },
     prelude::{EventHandler, GatewayIntents},
 };
 use slashery::{SlashArgs, SlashCmd, SlashCmdType, SlashCmds};
 use snafu::ResultExt;
+use time::OffsetDateTime;
 
 mod utils;
 
@@ -20,6 +28,8 @@ struct Opts {
     discord_token: String,
     #[clap(long, env)]
     discord_app_id: u64,
+    #[clap(long, env)]
+    database_url: String,
 }
 
 #[derive(SlashCmd)]
@@ -37,7 +47,9 @@ enum Cmd {
     MakeRequest(MakeRequest),
 }
 
-struct Handler;
+struct Handler {
+    db: DatabaseConnection,
+}
 
 #[serenity::async_trait]
 impl EventHandler for Handler {
@@ -66,113 +78,59 @@ impl Handler {
         req: MakeRequest,
         ctx: serenity::prelude::Context,
     ) {
-        let subrequests = req.tasks.split(';');
-        cmd.create_interaction_response(&ctx.http, |m| {
-            m.interaction_response_data(|m| {
-                let mut tasks = CreateEmbed::default();
-                tasks.title("Tasks");
-                let task_items = subrequests
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, subreq)| format!("{}. {subreq}", i + 1))
-                    .collect::<Vec<_>>();
-                tasks.description(task_items.join("\n"));
-                m.content(format!("Request by <@{}>: {}", cmd.user.id, req.title))
-                    .add_embed(tasks)
-                    .components(|c| {
-                        c.create_action_row(|r| {
-                            r.create_select_menu(|m| {
-                                m.custom_id("complete-task")
-                                    .placeholder("Mark task as completed")
-                                    .options(|o| {
-                                        o.set_options(
-                                            task_items
-                                                .iter()
-                                                .map(|t| {
-                                                    let mut opt = CreateSelectMenuOption::default();
-                                                    opt.value(t).label(t);
-                                                    opt
-                                                })
-                                                .collect(),
-                                        )
-                                    })
-                            })
-                        })
-                    })
-            })
-        })
+        let tasks = req.tasks.split(';').filter(|task| !task.is_empty());
+        let user = get_user_by_discord(&self.db, cmd.user.id).await.unwrap();
+        let request = request::ActiveModel {
+            title: Set(req.title),
+            created_by: Set(user.id),
+            // We only know the message ID once it has been created, so defer until after
+            // discord_message_id: Set(cmd.id.0 as i64),
+            ..Default::default()
+        }
+        .insert(&self.db)
         .await
         .unwrap();
+        task::Entity::insert_many(tasks.enumerate().map(|(i, task)| task::ActiveModel {
+            request: Set(request.id),
+            weight: Set(i as i32 + 1),
+            task: Set(task.to_string()),
+            ..Default::default()
+        }))
+        .exec(&self.db)
+        .await
+        .unwrap();
+
+        let rendered = render_request(&self.db, request.id).await;
+        cmd.create_interaction_response(&ctx.http, |r| rendered.create_interaction_response(r))
+            .await
+            .unwrap();
     }
 
     async fn complete_request_task(
         &self,
-        mut comp: MessageComponentInteraction,
+        comp: MessageComponentInteraction,
         ctx: serenity::prelude::Context,
     ) {
-        // dbg!(&comp.data);
-        let tasks_embed = comp
-            .message
-            .embeds
-            .iter_mut()
-            .find(|em| em.title.as_deref() == Some("Tasks"))
-            .expect("message has no tasks");
-        if let Some(tasks_desc) = &mut tasks_embed.description {
-            *tasks_desc = tasks_desc
-                .lines()
-                .map(|line| {
-                    if comp.data.values.iter().any(|v| *v == line) {
-                        if let Some((i, task)) = line.split_once(". ") {
-                            let now_unix = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-                            format!("{i}. ~~{task}~~ completed by <@{}> at <t:{now_unix}> (<t:{now_unix}:R>)", comp.user.id)
-                        } else {
-                            line.to_string()
-                        }
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<String>>()
-                .join("\n");
-        }
-        let task_items_full = tasks_embed.description.clone().unwrap_or_default();
-        let options: Vec<_> = task_items_full
-            .lines()
-            .filter(|t| !t.contains("~~"))
-            .map(|t| {
-                let mut opt = CreateSelectMenuOption::default();
-                opt.value(t).label(t);
-                opt
+        let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
+        let tasks = task::Entity::update_many()
+            .set(task::ActiveModel {
+                assigned_to: Set(Some(user.id)),
+                completed_at: Set(Some(OffsetDateTime::now_utc())),
+                ..Default::default()
             })
-            .collect();
-        comp.edit_original_message(&ctx.http, |m| {
-            m.interaction_response_data(|m| {
-                m.set_embeds(comp.message.embeds.iter().cloned().map(CreateEmbed::from))
-                    .components(|c| {
-                        if !options.is_empty() {
-                            c.create_action_row(|r| {
-                                r.create_select_menu(|m| {
-                                    m.custom_id("complete-task")
-                                        .placeholder("Mark task as completed")
-                                        .options(|o| o.set_options(options))
-                                })
-                            })
-                        } else {
-                            c
-                        }
-                    })
-            })
-        })
-        .await
-        .unwrap();
-        // tasks_embed
-        //     .description
-        //     .unwrap_or_default()
-        //     .lines()
-        //     .collect::<Vec>();
-        // for completed_task in &comp.data.values {
-        //     tasks_embed
-        // }
+            .filter(
+                task::Column::Id
+                    .is_in(comp.data.values.iter().map(|v| Uuid::parse_str(v).unwrap())),
+            )
+            .exec_with_returning(&self.db)
+            .await
+            .unwrap();
+        let request_id = tasks.get(0).expect("no updated task").request;
+
+        let rendered = render_request(&self.db, request_id).await;
+        comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
+            .await
+            .unwrap();
     }
 }
 
@@ -180,9 +138,15 @@ impl Handler {
 #[tokio::main]
 async fn main() -> Result<(), snafu::Whatever> {
     let opts = Opts::parse();
+    let db = Database::connect(opts.database_url)
+        .await
+        .whatever_context("failed to connect to database")?;
+    migration::Migrator::up(&db, None)
+        .await
+        .whatever_context("failed to apply migrations")?;
     let mut discord = serenity::Client::builder(&opts.discord_token, GatewayIntents::empty())
         .application_id(opts.discord_app_id)
-        .event_handler(Handler)
+        .event_handler(Handler { db })
         .await
         .whatever_context("failed to build discord client")?;
     discord
@@ -199,4 +163,127 @@ async fn main() -> Result<(), snafu::Whatever> {
         .await
         .whatever_context("failed to run discord bot")?;
     Ok(())
+}
+
+async fn get_user_by_discord(
+    db: &DatabaseConnection,
+    discord_user: UserId,
+) -> Result<entity::user::Model, DbErr> {
+    entity::prelude::User::insert(entity::user::ActiveModel {
+        discord_user_id: Set(discord_user.0 as i64),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::column(entity::user::Column::DiscordUserId)
+            // No-op update clause means the user is still returned by the upsert RETURNING
+            .update_column(entity::user::Column::DiscordUserId)
+            .to_owned(),
+    )
+    .exec_with_returning(db)
+    .await
+}
+
+async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRequest {
+    use std::fmt::Write;
+
+    let request = request::Entity::find_by_id(request_id)
+        .one(db)
+        .await
+        .unwrap()
+        .expect("could not find request model");
+    let task_created_by = request
+        .find_related(user::Entity)
+        .one(db)
+        .await
+        .unwrap()
+        .expect("could not find creator of request");
+    let tasks = request
+        .find_related(task::Entity)
+        .order_by_asc(task::Column::Weight)
+        .find_with_related(user::Entity)
+        .all(db)
+        .await
+        .unwrap();
+
+    RenderedRequest {
+        content: (format!(
+            "Request by <@{}>: {}",
+            task_created_by.discord_user_id, request.title
+        )),
+        embed: {
+            let mut embed = CreateEmbed::default();
+            embed.title("Tasks").description(
+                tasks
+                    .iter()
+                    .map(|(task, task_users)| {
+                        if let Some(completed_at) = task.completed_at {
+                            let mut task_str = format!(
+                                "{}. ~~{}~~ completed at <t:{completed_at}> (<t:{completed_at}:R>)",
+                                task.weight,
+                                &task.task,
+                                completed_at = completed_at.unix_timestamp()
+                            );
+                            if let Some(assignee) = task
+                                .assigned_to
+                                .and_then(|id| task_users.iter().find(|u| u.id == id))
+                            {
+                                task_str
+                                    .write_fmt(format_args!(" by <@{}>", assignee.discord_user_id))
+                                    .unwrap();
+                            }
+                            task_str.push('\n');
+                            task_str
+                        } else {
+                            format!("{}. {}\n", task.weight, &task.task)
+                        }
+                    })
+                    .collect::<String>(),
+            );
+            embed
+        },
+        components: {
+            let mut components = CreateComponents::default();
+            let uncompleted_tasks = tasks
+                .iter()
+                .filter(|(task, _)| task.completed_at.is_none())
+                .collect::<Vec<_>>();
+            if !uncompleted_tasks.is_empty() {
+                components.create_action_row(|row| {
+                    row.create_select_menu(|menu| {
+                        menu.custom_id("complete-task")
+                            .placeholder("Mark task as completed")
+                            .options(|opts| {
+                                uncompleted_tasks.iter().for_each(|(task, _)| {
+                                    opts.create_option(|opt| {
+                                        opt.value(task.id)
+                                            .label(format!("{}. {}", task.weight, task.task))
+                                    });
+                                });
+                                opts
+                            })
+                    })
+                });
+            }
+            components
+        },
+    }
+}
+
+struct RenderedRequest {
+    content: String,
+    embed: CreateEmbed,
+    components: CreateComponents,
+}
+
+impl RenderedRequest {
+    fn create_interaction_response<'a, 'b>(
+        self,
+        r: &'a mut CreateInteractionResponse<'b>,
+    ) -> &'a mut CreateInteractionResponse<'b> {
+        r.interaction_response_data(|d| {
+            d.content(self.content)
+                .add_embed(self.embed)
+                .set_components(self.components)
+        })
+    }
 }
