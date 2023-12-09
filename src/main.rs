@@ -63,6 +63,7 @@ impl EventHandler for Handler {
                 Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
             },
             Interaction::MessageComponent(comp) => match &*comp.data.custom_id {
+                "claim-task" => self.claim_request_task(comp, ctx).await,
                 "complete-task" => self.complete_request_task(comp, ctx).await,
                 id => panic!("unknown message component id {id:?}"),
             },
@@ -113,6 +114,33 @@ impl Handler {
         .update(&self.db)
         .await
         .unwrap();
+    }
+
+    async fn claim_request_task(
+        &self,
+        comp: MessageComponentInteraction,
+        ctx: serenity::prelude::Context,
+    ) {
+        let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
+        let tasks = task::Entity::update_many()
+            .set(task::ActiveModel {
+                assigned_to: Set(Some(user.id)),
+                started_at: Set(Some(OffsetDateTime::now_utc())),
+                ..Default::default()
+            })
+            .filter(
+                task::Column::Id
+                    .is_in(comp.data.values.iter().map(|v| Uuid::parse_str(v).unwrap())),
+            )
+            .exec_with_returning(&self.db)
+            .await
+            .unwrap();
+        let request_id = tasks.get(0).expect("no updated task").request;
+
+        let rendered = render_request(&self.db, request_id).await;
+        comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
+            .await
+            .unwrap();
     }
 
     async fn complete_request_task(
@@ -225,13 +253,22 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                 tasks
                     .iter()
                     .map(|(task, task_users)| {
-                        if let Some(completed_at) = task.completed_at {
-                            let mut task_str = format!(
-                                "{}. ~~{}~~ completed at <t:{completed_at}> (<t:{completed_at}:R>)",
-                                task.weight,
-                                &task.task,
-                                completed_at = completed_at.unix_timestamp()
-                            );
+                        let mut task_str = format!(
+                            "{}. {disabled}{}{disabled}",
+                            task.weight,
+                            &task.task,
+                            disabled = task.completed_at.map_or("", |_| "~~")
+                        );
+                        let state = Some("completed")
+                            .zip(task.completed_at)
+                            .or(Some("claimed").zip(task.started_at));
+                        if let Some((state, timestamp)) = state {
+                            task_str
+                                .write_fmt(format_args!(
+                                    ", {state} at <t:{timestamp}> (<t:{timestamp}:R>)",
+                                    timestamp = timestamp.unix_timestamp()
+                                ))
+                                .unwrap();
                             if let Some(assignee) = task
                                 .assigned_to
                                 .and_then(|id| task_users.iter().find(|u| u.id == id))
@@ -240,11 +277,9 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                                     .write_fmt(format_args!(" by <@{}>", assignee.discord_user_id))
                                     .unwrap();
                             }
-                            task_str.push('\n');
-                            task_str
-                        } else {
-                            format!("{}. {}\n", task.weight, &task.task)
                         }
+                        task_str.push('\n');
+                        task_str
                     })
                     .collect::<String>(),
             );
@@ -256,6 +291,27 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                 .iter()
                 .filter(|(task, _)| task.completed_at.is_none())
                 .collect::<Vec<_>>();
+            let unclaimed_tasks = uncompleted_tasks
+                .iter()
+                .filter(|(task, _)| task.started_at.is_none())
+                .collect::<Vec<_>>();
+            if !unclaimed_tasks.is_empty() {
+                components.create_action_row(|row| {
+                    row.create_select_menu(|menu| {
+                        menu.custom_id("claim-task")
+                            .placeholder("Claim task")
+                            .options(|opts| {
+                                unclaimed_tasks.iter().for_each(|(task, _)| {
+                                    opts.create_option(|opt| {
+                                        opt.value(task.id)
+                                            .label(format!("{}. {}", task.weight, task.task))
+                                    });
+                                });
+                                opts
+                            })
+                    })
+                });
+            }
             if !uncompleted_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
