@@ -13,6 +13,7 @@ pub struct Model {
     pub discord_message_id: Option<i64>,
     pub title: String,
     pub discord_channel_id: Option<i64>,
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

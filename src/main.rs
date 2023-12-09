@@ -1,3 +1,5 @@
+use std::{collections::HashMap, str::FromStr};
+
 use clap::Parser;
 use entity::{archive_rule, request, task, user};
 use migration::MigratorTrait;
@@ -5,10 +7,14 @@ use sea_orm::{
     prelude::Uuid, sea_query::OnConflict, ActiveModelTrait, ActiveValue::Set, ColumnTrait,
     Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter, QueryOrder,
 };
+use serde::{de::IntoDeserializer, Deserialize};
 use serenity::{
     builder::{CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage},
     model::{
-        application::interaction::message_component::MessageComponentInteraction,
+        application::{
+            command::CommandOptionChoice,
+            interaction::message_component::MessageComponentInteraction,
+        },
         id::ChannelId,
         prelude::{
             interaction::{application_command::ApplicationCommandInteraction, Interaction},
@@ -17,8 +23,9 @@ use serenity::{
     },
     prelude::{EventHandler, GatewayIntents},
 };
-use slashery::{SlashArgs, SlashCmd, SlashCmdType, SlashCmds};
+use slashery::{SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds};
 use snafu::ResultExt;
+use strum::IntoEnumIterator;
 use time::OffsetDateTime;
 
 mod utils;
@@ -33,6 +40,63 @@ struct Opts {
     database_url: String,
 }
 
+#[derive(strum::AsRefStr, strum::EnumIter, strum::EnumString)]
+enum RequestType {
+    General,
+    Truck,
+    Flatbed,
+    Freighter,
+    Train,
+}
+
+impl RequestType {
+    fn thumbnail(&self) -> Option<&'static str> {
+        match self {
+            RequestType::General => None,
+            RequestType::Truck => Some("https://cdn.discordapp.com/attachments/919852056091701299/920553851008987196/Dunne_Transport_Vehicle_Icon.png"),
+            RequestType::Flatbed => Some("https://cdn.discordapp.com/attachments/919852056091701299/920553850354688061/FlatbedTruckVehicleIcon.png"),
+            RequestType::Freighter => Some("https://cdn.discordapp.com/attachments/919852056091701299/920552847928602624/FreighterVehicleIcon.png"),
+            RequestType::Train => Some("https://cdn.discordapp.com/attachments/919852056091701299/1094794004945698938/ezgif.com-webp-to-png.png"),
+        }
+    }
+}
+
+impl SlashArg for RequestType {
+    fn arg_parse(
+        arg: Option<&serenity::model::prelude::application_command::CommandDataOption>,
+    ) -> Result<Self, slashery::ArgFromInteractionError> {
+        let arg = String::arg_parse(arg)?;
+        RequestType::from_str(&arg).map_err(|_| {
+            slashery::ArgFromInteractionError::InvalidValueForType {
+                expected: serenity::model::application::command::CommandOptionType::String,
+                got: arg.into(),
+            }
+        })
+    }
+
+    fn arg_discord_type() -> serenity::model::prelude::command::CommandOptionType {
+        serenity::model::application::command::CommandOptionType::String
+    }
+
+    fn arg_required() -> bool {
+        true
+    }
+
+    fn arg_choices() -> Vec<serenity::model::prelude::command::CommandOptionChoice> {
+        Self::iter()
+            .map(|ty| {
+                // CommandOptionChoice doesn't have a default constructor, so we have to go this roundabout way to construct one...
+                CommandOptionChoice::deserialize(<HashMap<_, _> as IntoDeserializer<
+                    serde::de::value::Error,
+                >>::into_deserializer(
+                    HashMap::from([("name", ty.as_ref()), ("value", ty.as_ref())]),
+                ))
+                .unwrap()
+            })
+            .collect()
+    }
+}
+
 #[derive(SlashCmd)]
 #[slashery(name = "request", kind = "SlashCmdType::ChatInput")]
 /// Make a new request
@@ -41,6 +105,8 @@ struct MakeRequest {
     title: String,
     /// One or more tasks to be completed, separated by `;`
     tasks: String,
+    /// The kind of request
+    kind: RequestType,
 }
 
 #[derive(SlashCmds)]
@@ -87,6 +153,7 @@ impl Handler {
             title: Set(req.title),
             created_by: Set(user.id),
             discord_channel_id: Set(Some(cmd.channel_id.0 as i64)),
+            thumbnail_url: Set(req.kind.thumbnail().map(str::to_string)),
             // We only know the message ID once it has been created, so defer until after
             // discord_message_id: Set(cmd.id.0 as i64),
             ..Default::default()
@@ -250,6 +317,7 @@ impl Handler {
             title: Set(original_request.title),
             created_by: Set(user.id),
             discord_channel_id: Set(Some(channel.id.0 as i64)),
+            thumbnail_url: Set(original_request.thumbnail_url),
             ..Default::default()
         }
         .insert(&self.db)
@@ -401,6 +469,9 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                     })
                     .collect::<String>(),
             );
+            if let Some(thumbnail_url) = &request.thumbnail_url {
+                embed.thumbnail(thumbnail_url);
+            }
             embed
         },
         components: {

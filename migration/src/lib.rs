@@ -3,6 +3,7 @@ pub use sea_orm_migration::prelude::*;
 mod m20231208_203518_create_request_table;
 mod m20231209_000613_create_archive_rules_table;
 mod m20231209_005830_add_request_channel;
+mod m20231209_013836_add_request_thumbnail;
 
 pub struct Migrator;
 
@@ -13,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20231208_203518_create_request_table::Migration),
             Box::new(m20231209_000613_create_archive_rules_table::Migration),
             Box::new(m20231209_005830_add_request_channel::Migration),
+            Box::new(m20231209_013836_add_request_thumbnail::Migration),
         ]
     }
 }
