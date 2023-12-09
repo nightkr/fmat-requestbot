@@ -10,7 +10,6 @@ impl MigrationTrait for Migration {
             .create_table(
                 Table::create()
                     .table(ArchiveRule::Table)
-                    .if_not_exists()
                     .col(
                         ColumnDef::new(ArchiveRule::FromChannel)
                             .big_unsigned()

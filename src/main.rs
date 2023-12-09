@@ -66,6 +66,7 @@ impl EventHandler for Handler {
             Interaction::MessageComponent(comp) => match &*comp.data.custom_id {
                 "claim-task" => self.claim_request_task(comp, ctx).await,
                 "complete-task" => self.complete_request_task(comp, ctx).await,
+                "repeat-request" => self.repeat_request(comp, ctx).await,
                 id => panic!("unknown message component id {id:?}"),
             },
             _ => (),
@@ -85,6 +86,7 @@ impl Handler {
         let request = request::ActiveModel {
             title: Set(req.title),
             created_by: Set(user.id),
+            discord_channel_id: Set(Some(cmd.channel_id.0 as i64)),
             // We only know the message ID once it has been created, so defer until after
             // discord_message_id: Set(cmd.id.0 as i64),
             ..Default::default()
@@ -202,6 +204,14 @@ impl Handler {
                 comp.delete_followup_message(&ctx.http, comp.message.id)
                     .await
                     .unwrap();
+                request::ActiveModel {
+                    id: sea_orm::ActiveValue::Unchanged(request_id),
+                    discord_message_id: Set(Some(archived_msg.id.0 as i64)),
+                    ..Default::default()
+                }
+                .update(&self.db)
+                .await
+                .unwrap();
                 return;
             }
         }
@@ -209,6 +219,73 @@ impl Handler {
         comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
             .await
             .unwrap();
+    }
+
+    async fn repeat_request(
+        &self,
+        comp: MessageComponentInteraction,
+        ctx: serenity::prelude::Context,
+    ) {
+        let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
+        let original_request = request::Entity::find()
+            .filter(request::Column::DiscordMessageId.eq(comp.message.id.0 as i64))
+            .one(&self.db)
+            .await
+            .unwrap()
+            .expect("original request not found");
+        let original_tasks = original_request
+            .find_related(task::Entity)
+            .all(&self.db)
+            .await
+            .unwrap();
+        let channel = ctx
+            .cache
+            .guild_channel(
+                original_request
+                    .discord_channel_id
+                    .expect("no channel stored for original message") as u64,
+            )
+            .expect("channel of original message not found");
+        let request = request::ActiveModel {
+            title: Set(original_request.title),
+            created_by: Set(user.id),
+            discord_channel_id: Set(Some(channel.id.0 as i64)),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .unwrap();
+        task::Entity::insert_many(original_tasks.into_iter().map(|task| task::ActiveModel {
+            request: Set(request.id),
+            weight: Set(task.weight),
+            task: Set(task.task),
+            ..Default::default()
+        }))
+        .exec(&self.db)
+        .await
+        .unwrap();
+
+        let rendered = render_request(&self.db, request.id).await;
+        let message = channel
+            .send_message(&ctx.http, |msg| rendered.create_message(msg))
+            .await
+            .unwrap();
+        comp.create_interaction_response(&ctx.http, |msg| {
+            msg.interaction_response_data(|r| {
+                r.ephemeral(true)
+                    .content(format!("Request has been repeated, see {}", message.link()))
+            })
+        })
+        .await
+        .unwrap();
+
+        request::ActiveModel {
+            discord_message_id: Set(Some(message.id.0 as i64)),
+            ..request.into()
+        }
+        .update(&self.db)
+        .await
+        .unwrap();
     }
 }
 
@@ -368,6 +445,11 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                                 opts
                             })
                     })
+                });
+            }
+            if uncompleted_tasks.is_empty() && request.discord_channel_id.is_some() {
+                components.create_action_row(|row| {
+                    row.create_button(|button| button.custom_id("repeat-request").label("Repeat"))
                 });
             }
             components
