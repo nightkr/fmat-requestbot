@@ -197,7 +197,11 @@ impl Handler {
                 })
                 .await
                 .unwrap();
-                comp.message.delete(&ctx.http).await.unwrap();
+                // apparently the interaction message counts as a followup, which should avoid
+                // requiring permission to see the channel
+                comp.delete_followup_message(&ctx.http, comp.message.id)
+                    .await
+                    .unwrap();
                 return;
             }
         }
