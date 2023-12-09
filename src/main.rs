@@ -155,7 +155,7 @@ impl Handler {
             .filter(|task| !task.is_empty())
             .flat_map(|task| {
                 let (_, [multiplier, task]) = multiply_regex
-                    .captures(task)
+                    .captures(task.trim())
                     .expect("task did not match regex")
                     .extract();
                 let multiplier = Some(multiplier)
