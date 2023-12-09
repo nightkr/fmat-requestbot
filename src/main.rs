@@ -55,7 +55,7 @@ impl RequestType {
             RequestType::General => None,
             RequestType::Truck => Some("https://cdn.discordapp.com/attachments/919852056091701299/920553851008987196/Dunne_Transport_Vehicle_Icon.png"),
             RequestType::Flatbed => Some("https://cdn.discordapp.com/attachments/919852056091701299/920553850354688061/FlatbedTruckVehicleIcon.png"),
-            RequestType::Freighter => Some("https://cdn.discordapp.com/attachments/919852056091701299/920552847928602624/FreighterVehicleIcon.png"),
+            RequestType::Freighter => Some("https://cdn.discordapp.com/attachments/1170732453116248226/1182871827995963444/image.png"),
             RequestType::Train => Some("https://cdn.discordapp.com/attachments/919852056091701299/1094794004945698938/ezgif.com-webp-to-png.png"),
         }
     }
