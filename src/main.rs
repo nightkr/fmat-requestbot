@@ -1,14 +1,15 @@
 use clap::Parser;
-use entity::{request, task, user};
+use entity::{archive_rule, request, task, user};
 use migration::MigratorTrait;
 use sea_orm::{
     prelude::Uuid, sea_query::OnConflict, ActiveModelTrait, ActiveValue::Set, ColumnTrait,
     Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter, QueryOrder,
 };
 use serenity::{
-    builder::{CreateComponents, CreateEmbed, CreateInteractionResponse},
+    builder::{CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage},
     model::{
         application::interaction::message_component::MessageComponentInteraction,
+        id::ChannelId,
         prelude::{
             interaction::{application_command::ApplicationCommandInteraction, Interaction},
             UserId,
@@ -164,7 +165,43 @@ impl Handler {
             .unwrap();
         let request_id = tasks.get(0).expect("no updated task").request;
 
+        let tasks = task::Entity::find()
+            .filter(task::Column::Request.eq(request_id))
+            .all(&self.db)
+            .await
+            .unwrap();
+
         let rendered = render_request(&self.db, request_id).await;
+        // try to archive if required
+        if tasks.iter().all(|t| t.completed_at.is_some()) {
+            if let Some(archive_rule) = archive_rule::Entity::find_by_id(comp.channel_id.0 as i64)
+                .one(&self.db)
+                .await
+                .unwrap()
+            {
+                let archive_channel = ctx
+                    .cache
+                    .guild_channel(ChannelId(archive_rule.to_channel as u64))
+                    .expect("archive channel not found");
+                let archived_msg = archive_channel
+                    .send_message(&ctx, |msg| rendered.create_message(msg))
+                    .await
+                    .unwrap();
+                comp.create_interaction_response(&ctx.http, |msg| {
+                    msg.interaction_response_data(|r| {
+                        r.ephemeral(true).content(format!(
+                            "Request has been archived, see {}",
+                            archived_msg.link()
+                        ))
+                    })
+                })
+                .await
+                .unwrap();
+                comp.message.delete(&ctx.http).await.unwrap();
+                return;
+            }
+        }
+
         comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
             .await
             .unwrap();
@@ -181,7 +218,7 @@ async fn main() -> Result<(), snafu::Whatever> {
     migration::Migrator::up(&db, None)
         .await
         .whatever_context("failed to apply migrations")?;
-    let mut discord = serenity::Client::builder(&opts.discord_token, GatewayIntents::empty())
+    let mut discord = serenity::Client::builder(&opts.discord_token, GatewayIntents::GUILDS)
         .application_id(opts.discord_app_id)
         .event_handler(Handler { db })
         .await
@@ -350,5 +387,11 @@ impl RenderedRequest {
                 .add_embed(self.embed)
                 .set_components(self.components)
         })
+    }
+
+    fn create_message<'a, 'b>(self, r: &'a mut CreateMessage<'b>) -> &'a mut CreateMessage<'b> {
+        r.content(self.content)
+            .set_embed(self.embed)
+            .set_components(self.components)
     }
 }

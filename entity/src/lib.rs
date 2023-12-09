@@ -2,6 +2,7 @@
 
 pub mod prelude;
 
+pub mod archive_rule;
 pub mod request;
 pub mod task;
 pub mod user;
