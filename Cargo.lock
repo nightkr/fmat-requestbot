@@ -938,6 +938,7 @@ dependencies = [
  "clap",
  "entity",
  "migration",
+ "regex",
  "sea-orm",
  "serde",
  "serde_json",

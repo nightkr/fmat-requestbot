@@ -3,6 +3,7 @@ use std::{collections::HashMap, str::FromStr};
 use clap::Parser;
 use entity::{archive_rule, request, task, user};
 use migration::MigratorTrait;
+use regex::Regex;
 use sea_orm::{
     prelude::Uuid, sea_query::OnConflict, ActiveModelTrait, ActiveValue::Set, ColumnTrait,
     Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter, QueryOrder,
@@ -147,7 +148,21 @@ impl Handler {
         req: MakeRequest,
         ctx: serenity::prelude::Context,
     ) {
-        let tasks = req.tasks.split(';').filter(|task| !task.is_empty());
+        let multiply_regex = Regex::new(r"(?:\{(\d+)x\}|())(.*)").unwrap();
+        let tasks = req
+            .tasks
+            .split(';')
+            .filter(|task| !task.is_empty())
+            .flat_map(|task| {
+                let (_, [multiplier, task]) = multiply_regex
+                    .captures(task)
+                    .expect("task did not match regex")
+                    .extract();
+                let multiplier = Some(multiplier)
+                    .filter(|x| !str::is_empty(x))
+                    .map_or(1, |x| x.parse::<usize>().unwrap());
+                std::iter::repeat(task.trim()).take(multiplier)
+            });
         let user = get_user_by_discord(&self.db, cmd.user.id).await.unwrap();
         let request = request::ActiveModel {
             title: Set(req.title),
