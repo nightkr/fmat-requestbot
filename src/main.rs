@@ -1,4 +1,8 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{BuildHasher, BuildHasherDefault},
+    str::FromStr,
+};
 
 use clap::Parser;
 use entity::{archive_rule, request, task, user};
@@ -30,6 +34,17 @@ use strum::IntoEnumIterator;
 use time::OffsetDateTime;
 
 mod utils;
+
+const QUIPS: &[&str] = &[
+    "Remember: There is no shadow council",
+    "Have you driven over Nautilus today?",
+    "quini bozo",
+    "Powered by your hopes and dreams... delicious!",
+    "9 out of 10 doctors recommend a daily diet of at least 10 rmats",
+    "Break war BTW",
+    "Almost as good as the old request bot",
+    "Instructions unclear? Try reading them bottom-up!",
+];
 
 #[derive(clap::Parser)]
 struct Opts {
@@ -443,11 +458,16 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
         .await
         .unwrap();
 
+    let quip = {
+        let hash = BuildHasherDefault::<DefaultHasher>::default().hash_one(request_id);
+        QUIPS[hash as usize % QUIPS.len()]
+    };
+
     RenderedRequest {
         content: format!("# {}", request.title),
         embed: {
             let mut embed = CreateEmbed::default();
-            embed.title("Tasks").description(
+            embed.title("Tasks").footer(|f| f.text(quip)).description(
                 tasks
                     .iter()
                     .map(|(task, task_users)| {
