@@ -444,10 +444,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
         .unwrap();
 
     RenderedRequest {
-        content: (format!(
-            "Request by <@{}>: {}",
-            task_created_by.discord_user_id, request.title
-        )),
+        content: format!("# {}", request.title),
         embed: {
             let mut embed = CreateEmbed::default();
             embed.title("Tasks").description(
@@ -482,6 +479,10 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                         task_str.push('\n');
                         task_str
                     })
+                    .chain([format!(
+                        "*Requested by <@{}>*",
+                        task_created_by.discord_user_id
+                    )])
                     .collect::<String>(),
             );
             if let Some(thumbnail_url) = &request.thumbnail_url {
