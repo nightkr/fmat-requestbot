@@ -437,8 +437,6 @@ async fn get_user_by_discord(
 }
 
 async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRequest {
-    use std::fmt::Write;
-
     let request = request::Entity::find_by_id(request_id)
         .one(db)
         .await
@@ -470,35 +468,33 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             embed.title("Tasks").footer(|f| f.text(quip)).description(
                 tasks
                     .iter()
-                    .map(|(task, task_users)| {
-                        let mut task_str = format!(
-                            "{}. {disabled}{}{disabled}",
-                            task.weight,
-                            &task.task,
-                            disabled = task.completed_at.map_or("", |_| "~~")
-                        );
+                    .flat_map(|(task, task_users)| {
                         let state = Some("completed")
                             .zip(task.completed_at)
                             .or(Some("claimed").zip(task.started_at));
-                        if let Some((state, timestamp)) = state {
-                            task_str
-                                .write_fmt(format_args!(
+                        let assignee = task
+                            .assigned_to
+                            .and_then(|id| task_users.iter().find(|u| u.id == id));
+                        [
+                            Some(format!(
+                                "{}. {disabled}{}{disabled}",
+                                task.weight,
+                                &task.task,
+                                disabled = task.completed_at.map_or("", |_| "~~")
+                            )),
+                            state.map(|(state, timestamp)| {
+                                format!(
                                     ", {state} at <t:{timestamp}> (<t:{timestamp}:R>)",
                                     timestamp = timestamp.unix_timestamp()
-                                ))
-                                .unwrap();
-                            if let Some(assignee) = task
-                                .assigned_to
-                                .and_then(|id| task_users.iter().find(|u| u.id == id))
-                            {
-                                task_str
-                                    .write_fmt(format_args!(" by <@{}>", assignee.discord_user_id))
-                                    .unwrap();
-                            }
-                        }
-                        task_str.push('\n');
-                        task_str
+                                )
+                            }),
+                            state
+                                .and(assignee)
+                                .map(|assignee| format!(" by <@{}>", assignee.discord_user_id)),
+                            Some("\n".to_string()),
+                        ]
                     })
+                    .flatten()
                     .chain([format!(
                         "*Requested by <@{}>*",
                         task_created_by.discord_user_id
