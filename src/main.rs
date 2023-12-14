@@ -146,7 +146,8 @@ impl EventHandler for Handler {
                 Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
             },
             Interaction::MessageComponent(comp) => match &*comp.data.custom_id {
-                "claim-task" => self.claim_request_task(comp, ctx).await,
+                "claim-task" => self.claim_request_task(comp, ctx, ClaimMode::Claim).await,
+                "unclaim-task" => self.claim_request_task(comp, ctx, ClaimMode::Unclaim).await,
                 "complete-task" => self.complete_request_task(comp, ctx).await,
                 "repeat-request" => self.repeat_request(comp, ctx).await,
                 id => panic!("unknown message component id {id:?}"),
@@ -220,12 +221,13 @@ impl Handler {
         &self,
         comp: MessageComponentInteraction,
         ctx: serenity::prelude::Context,
+        mode: ClaimMode,
     ) {
         let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
         let tasks = task::Entity::update_many()
             .set(task::ActiveModel {
                 assigned_to: Set(Some(user.id)),
-                started_at: Set(Some(OffsetDateTime::now_utc())),
+                started_at: Set((mode == ClaimMode::Claim).then(OffsetDateTime::now_utc)),
                 ..Default::default()
             })
             .filter(
@@ -387,6 +389,12 @@ impl Handler {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum ClaimMode {
+    Unclaim,
+    Claim,
+}
+
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), snafu::Whatever> {
@@ -512,10 +520,27 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                 .iter()
                 .filter(|(task, _)| task.completed_at.is_none())
                 .collect::<Vec<_>>();
-            let unclaimed_tasks = uncompleted_tasks
+            let (claimed_tasks, unclaimed_tasks) = uncompleted_tasks
                 .iter()
-                .filter(|(task, _)| task.started_at.is_none())
-                .collect::<Vec<_>>();
+                .copied()
+                .partition::<Vec<_>, _>(|(task, _)| task.started_at.is_some());
+            if !claimed_tasks.is_empty() {
+                components.create_action_row(|row| {
+                    row.create_select_menu(|menu| {
+                        menu.custom_id("unclaim-task")
+                            .placeholder("Unclaim task")
+                            .options(|opts| {
+                                claimed_tasks.iter().for_each(|(task, _)| {
+                                    opts.create_option(|opt| {
+                                        opt.value(task.id)
+                                            .label(format!("{}. {}", task.weight, task.task))
+                                    });
+                                });
+                                opts
+                            })
+                    })
+                });
+            }
             if !unclaimed_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
