@@ -261,51 +261,42 @@ impl Handler {
         let request_id = updated_tasks.get(0).expect("no updated task").request;
 
         // try to archive if required
-        let tasks = task::Entity::find()
-            .filter(task::Column::Request.eq(request_id))
-            .all(&self.db)
+        let rendered = render_request(&self.db, request_id).await;
+        if let Some(archive_channel) =
+            should_archive_request_to(&self.db, request_id, comp.channel_id).await
+        {
+            let archive_channel = ctx
+                .cache
+                .guild_channel(archive_channel)
+                .expect("archive channel not found");
+            let archived_msg = archive_channel
+                .send_message(&ctx, |msg| rendered.create_message(msg))
+                .await
+                .unwrap();
+            comp.create_interaction_response(&ctx.http, |msg| {
+                msg.interaction_response_data(|r| {
+                    r.ephemeral(true).content(format!(
+                        "Request has been archived, see {}",
+                        archived_msg.link()
+                    ))
+                })
+            })
             .await
             .unwrap();
-        let rendered = render_request(&self.db, request_id).await;
-        if tasks.iter().all(|t| t.completed_at.is_some()) {
-            if let Some(archive_rule) = archive_rule::Entity::find_by_id(comp.channel_id.0 as i64)
-                .one(&self.db)
-                .await
-                .unwrap()
-            {
-                let archive_channel = ctx
-                    .cache
-                    .guild_channel(ChannelId(archive_rule.to_channel as u64))
-                    .expect("archive channel not found");
-                let archived_msg = archive_channel
-                    .send_message(&ctx, |msg| rendered.create_message(msg))
-                    .await
-                    .unwrap();
-                comp.create_interaction_response(&ctx.http, |msg| {
-                    msg.interaction_response_data(|r| {
-                        r.ephemeral(true).content(format!(
-                            "Request has been archived, see {}",
-                            archived_msg.link()
-                        ))
-                    })
-                })
+            // apparently the interaction message counts as a followup, which should avoid
+            // requiring permission to see the channel
+            comp.delete_followup_message(&ctx.http, comp.message.id)
                 .await
                 .unwrap();
-                // apparently the interaction message counts as a followup, which should avoid
-                // requiring permission to see the channel
-                comp.delete_followup_message(&ctx.http, comp.message.id)
-                    .await
-                    .unwrap();
-                request::ActiveModel {
-                    id: sea_orm::ActiveValue::Unchanged(request_id),
-                    discord_message_id: Set(Some(archived_msg.id.0 as i64)),
-                    ..Default::default()
-                }
-                .update(&self.db)
-                .await
-                .unwrap();
-                return;
+            request::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(request_id),
+                discord_message_id: Set(Some(archived_msg.id.0 as i64)),
+                ..Default::default()
             }
+            .update(&self.db)
+            .await
+            .unwrap();
+            return;
         }
 
         comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
@@ -379,6 +370,27 @@ impl Handler {
         .update(&self.db)
         .await
         .unwrap();
+    }
+}
+
+async fn should_archive_request_to(
+    db: &DatabaseConnection,
+    request_id: Uuid,
+    from_channel: ChannelId,
+) -> Option<ChannelId> {
+    let tasks = task::Entity::find()
+        .filter(task::Column::Request.eq(request_id))
+        .all(db)
+        .await
+        .unwrap();
+    if tasks.iter().all(|t| t.completed_at.is_some()) {
+        archive_rule::Entity::find_by_id(from_channel.0 as i64)
+            .one(db)
+            .await
+            .unwrap()
+            .map(|rule| ChannelId(rule.to_channel as u64))
+    } else {
+        None
     }
 }
 
