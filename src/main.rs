@@ -9,8 +9,12 @@ use entity::{archive_rule, request, task, user};
 use migration::MigratorTrait;
 use regex::Regex;
 use sea_orm::{
-    prelude::Uuid, sea_query::OnConflict, ActiveModelTrait, ActiveValue::Set, ColumnTrait,
-    Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter, QueryOrder,
+    prelude::Uuid,
+    sea_query::OnConflict,
+    ActiveModelTrait,
+    ActiveValue::{NotSet, Set},
+    ColumnTrait, Database, DatabaseConnection, DbErr, EntityTrait, ModelTrait, QueryFilter,
+    QueryOrder,
 };
 use serde::{de::IntoDeserializer, Deserialize};
 use serenity::{
@@ -146,9 +150,18 @@ impl EventHandler for Handler {
                 Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
             },
             Interaction::MessageComponent(comp) => match &*comp.data.custom_id {
-                "claim-task" => self.claim_request_task(comp, ctx, ClaimMode::Claim).await,
-                "unclaim-task" => self.claim_request_task(comp, ctx, ClaimMode::Unclaim).await,
-                "complete-task" => self.complete_request_task(comp, ctx).await,
+                "unclaim-task" => {
+                    self.update_request_task_status(comp, ctx, TaskState::Unclaimed)
+                        .await
+                }
+                "claim-task" => {
+                    self.update_request_task_status(comp, ctx, TaskState::Claimed)
+                        .await
+                }
+                "complete-task" => {
+                    self.update_request_task_status(comp, ctx, TaskState::Completed)
+                        .await
+                }
                 "repeat-request" => self.repeat_request(comp, ctx).await,
                 id => panic!("unknown message component id {id:?}"),
             },
@@ -217,17 +230,25 @@ impl Handler {
         .unwrap();
     }
 
-    async fn claim_request_task(
+    async fn update_request_task_status(
         &self,
         comp: MessageComponentInteraction,
         ctx: serenity::prelude::Context,
-        mode: ClaimMode,
+        state: TaskState,
     ) {
         let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
-        let tasks = task::Entity::update_many()
+        let updated_tasks = task::Entity::update_many()
             .set(task::ActiveModel {
                 assigned_to: Set(Some(user.id)),
-                started_at: Set((mode == ClaimMode::Claim).then(OffsetDateTime::now_utc)),
+                started_at: match &state {
+                    TaskState::Unclaimed => Set(None),
+                    TaskState::Claimed => Set(Some(OffsetDateTime::now_utc())),
+                    TaskState::Completed => NotSet,
+                },
+                completed_at: match &state {
+                    TaskState::Unclaimed | TaskState::Claimed => Set(None),
+                    TaskState::Completed => Set(Some(OffsetDateTime::now_utc())),
+                },
                 ..Default::default()
             })
             .filter(
@@ -237,43 +258,15 @@ impl Handler {
             .exec_with_returning(&self.db)
             .await
             .unwrap();
-        let request_id = tasks.get(0).expect("no updated task").request;
+        let request_id = updated_tasks.get(0).expect("no updated task").request;
 
-        let rendered = render_request(&self.db, request_id).await;
-        comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
-            .await
-            .unwrap();
-    }
-
-    async fn complete_request_task(
-        &self,
-        comp: MessageComponentInteraction,
-        ctx: serenity::prelude::Context,
-    ) {
-        let user = get_user_by_discord(&self.db, comp.user.id).await.unwrap();
-        let tasks = task::Entity::update_many()
-            .set(task::ActiveModel {
-                assigned_to: Set(Some(user.id)),
-                completed_at: Set(Some(OffsetDateTime::now_utc())),
-                ..Default::default()
-            })
-            .filter(
-                task::Column::Id
-                    .is_in(comp.data.values.iter().map(|v| Uuid::parse_str(v).unwrap())),
-            )
-            .exec_with_returning(&self.db)
-            .await
-            .unwrap();
-        let request_id = tasks.get(0).expect("no updated task").request;
-
+        // try to archive if required
         let tasks = task::Entity::find()
             .filter(task::Column::Request.eq(request_id))
             .all(&self.db)
             .await
             .unwrap();
-
         let rendered = render_request(&self.db, request_id).await;
-        // try to archive if required
         if tasks.iter().all(|t| t.completed_at.is_some()) {
             if let Some(archive_rule) = archive_rule::Entity::find_by_id(comp.channel_id.0 as i64)
                 .one(&self.db)
@@ -390,9 +383,10 @@ impl Handler {
 }
 
 #[derive(PartialEq, Eq)]
-enum ClaimMode {
-    Unclaim,
-    Claim,
+enum TaskState {
+    Unclaimed,
+    Claimed,
+    Completed,
 }
 
 #[snafu::report]
