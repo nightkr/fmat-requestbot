@@ -48,6 +48,11 @@ const QUIPS: &[&str] = &[
     "Break war BTW",
     "Almost as good as the old request bot",
     "Instructions unclear? Try reading them bottom-up!",
+    "T2 will tech in 15 minutes",
+    "Not sponsored by cryptocurrency gambling",
+    "Abandoned Ward has been lost to the colonials",
+    "F",
+    "This command has failed successfully",
 ];
 
 #[derive(clap::Parser)]
