@@ -18,7 +18,10 @@ use sea_orm::{
 };
 use serde::{de::IntoDeserializer, Deserialize};
 use serenity::{
-    builder::{CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage},
+    builder::{
+        CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage,
+        EditInteractionResponse,
+    },
     model::{
         application::{
             command::CommandOptionChoice,
@@ -228,9 +231,19 @@ impl Handler {
         .unwrap();
 
         let rendered = render_request(&self.db, request.id).await;
-        cmd.create_interaction_response(&ctx.http, |r| rendered.create_interaction_response(r))
-            .await
-            .unwrap();
+        cmd.create_interaction_response(&ctx.http, |r| {
+            rendered.clone().create_interaction_response(r)
+        })
+        .await
+        .unwrap();
+
+        // For some reason embed thumbnails are sometimes stripped out by Discord
+        // Editing the message _seems_ to add it back in...
+        cmd.edit_original_interaction_response(&ctx.http, |r| {
+            rendered.edit_interaction_response(r)
+        })
+        .await
+        .unwrap();
 
         let response_message = cmd.get_interaction_response(&ctx.http).await.unwrap();
         request::ActiveModel {
@@ -603,6 +616,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
     }
 }
 
+#[derive(Clone)]
 struct RenderedRequest {
     content: String,
     embed: CreateEmbed,
@@ -619,6 +633,15 @@ impl RenderedRequest {
                 .add_embed(self.embed)
                 .set_components(self.components)
         })
+    }
+
+    fn edit_interaction_response(
+        self,
+        r: &mut EditInteractionResponse,
+    ) -> &mut EditInteractionResponse {
+        r.content(self.content)
+            .add_embed(self.embed)
+            .set_components(self.components)
     }
 
     fn create_message<'a, 'b>(self, r: &'a mut CreateMessage<'b>) -> &'a mut CreateMessage<'b> {
