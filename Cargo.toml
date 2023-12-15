@@ -22,3 +22,6 @@ tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
 
 [workspace]
 members = ["migration", "entity"]
+
+[patch."git+https://github.com/nightkr/slashery"]
+# slashery = { path = "../slashery/slashery" }

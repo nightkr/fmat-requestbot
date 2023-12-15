@@ -35,7 +35,7 @@ use serenity::{
     },
     prelude::{EventHandler, GatewayIntents},
 };
-use slashery::{SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds};
+use slashery::{SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds, SlashComponents};
 use snafu::ResultExt;
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
@@ -149,6 +149,19 @@ enum Cmd {
     MakeRequest(MakeRequest),
 }
 
+#[derive(SlashComponents)]
+enum Component {
+    // Legacy aliases because untyped generator used kebab-case ids
+    #[slashery(id_alias("unclaim-task"))]
+    UnclaimTask,
+    #[slashery(id_alias("claim-task"))]
+    ClaimTask,
+    #[slashery(id_alias("complete-task"))]
+    CompleteTask,
+    #[slashery(id_alias("repeat-request"))]
+    RepeatRequest,
+}
+
 struct Handler {
     db: DatabaseConnection,
 }
@@ -164,22 +177,23 @@ impl EventHandler for Handler {
             Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd).unwrap() {
                 Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
             },
-            Interaction::MessageComponent(comp) => match &*comp.data.custom_id {
-                "unclaim-task" => {
-                    self.update_request_task_status(comp, ctx, TaskState::Unclaimed)
-                        .await
+            Interaction::MessageComponent(comp) => {
+                match Component::from_interaction(&comp).unwrap() {
+                    Component::UnclaimTask => {
+                        self.update_request_task_status(comp, ctx, TaskState::Unclaimed)
+                            .await
+                    }
+                    Component::ClaimTask => {
+                        self.update_request_task_status(comp, ctx, TaskState::Claimed)
+                            .await
+                    }
+                    Component::CompleteTask => {
+                        self.update_request_task_status(comp, ctx, TaskState::Completed)
+                            .await
+                    }
+                    Component::RepeatRequest => self.repeat_request(comp, ctx).await,
                 }
-                "claim-task" => {
-                    self.update_request_task_status(comp, ctx, TaskState::Claimed)
-                        .await
-                }
-                "complete-task" => {
-                    self.update_request_task_status(comp, ctx, TaskState::Completed)
-                        .await
-                }
-                "repeat-request" => self.repeat_request(comp, ctx).await,
-                id => panic!("unknown message component id {id:?}"),
-            },
+            }
             _ => (),
         }
     }
@@ -558,7 +572,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             if !claimed_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
-                        menu.custom_id("unclaim-task")
+                        menu.custom_id(Component::UnclaimTask.component_id())
                             .placeholder("Unclaim task")
                             .options(|opts| {
                                 claimed_tasks.iter().for_each(|(task, _)| {
@@ -575,7 +589,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             if !unclaimed_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
-                        menu.custom_id("claim-task")
+                        menu.custom_id(Component::ClaimTask.component_id())
                             .placeholder("Claim task")
                             .options(|opts| {
                                 unclaimed_tasks.iter().for_each(|(task, _)| {
@@ -592,7 +606,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             if !uncompleted_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
-                        menu.custom_id("complete-task")
+                        menu.custom_id(Component::CompleteTask.component_id())
                             .placeholder("Mark task as completed")
                             .options(|opts| {
                                 uncompleted_tasks.iter().for_each(|(task, _)| {
@@ -608,7 +622,11 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             }
             if uncompleted_tasks.is_empty() && request.discord_channel_id.is_some() {
                 components.create_action_row(|row| {
-                    row.create_button(|button| button.custom_id("repeat-request").label("Repeat"))
+                    row.create_button(|button| {
+                        button
+                            .custom_id(Component::RepeatRequest.component_id())
+                            .label("Repeat")
+                    })
                 });
             }
             components
