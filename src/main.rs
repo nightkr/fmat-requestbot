@@ -53,6 +53,13 @@ const QUIPS: &[&str] = &[
     "Abandoned Ward has been lost to the colonials",
     "F",
     "This command has failed successfully",
+    "Kingstone is under attack",
+    "Nuke Jade Cove",
+    "QRF Deez Nutz",
+    "You got any Delvins?",
+    "SCOPE CREEP",
+    "Daily reminder to press W",
+    "Daily reminder to set your MPF queues",
 ];
 
 #[derive(clap::Parser)]
