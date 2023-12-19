@@ -351,6 +351,7 @@ impl Handler {
             request::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(request_id),
                 discord_message_id: Set(Some(archived_msg.id.0 as i64)),
+                archived_on: Set(Some(OffsetDateTime::now_utc())),
                 ..Default::default()
             }
             .update(&self.db)
@@ -438,11 +439,15 @@ async fn should_archive_request_to(
     request_id: Uuid,
     from_channel: ChannelId,
 ) -> Option<ChannelId> {
-    let tasks = task::Entity::find()
-        .filter(task::Column::Request.eq(request_id))
-        .all(db)
+    let request = request::Entity::find_by_id(request_id)
+        .one(db)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request not found");
+    if request.archived_on.is_some() {
+        return None;
+    }
+    let tasks = request.find_related(task::Entity).all(db).await.unwrap();
     if tasks.iter().all(|t| t.completed_at.is_some()) {
         archive_rule::Entity::find_by_id(from_channel.0 as i64)
             .one(db)
