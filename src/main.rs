@@ -2,10 +2,13 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{BuildHasher, BuildHasherDefault},
     str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
 
 use clap::Parser;
 use entity::{archive_rule, request, task, user};
+use futures::FutureExt;
 use migration::MigratorTrait;
 use regex::Regex;
 use sea_orm::{
@@ -36,10 +39,11 @@ use serenity::{
     prelude::{EventHandler, GatewayIntents},
 };
 use slashery::{SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds, SlashComponents};
-use snafu::ResultExt;
+use snafu::{futures::TryFutureExt as _, ResultExt};
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
 
+mod expiration_controller;
 mod utils;
 
 const QUIPS: &[&str] = &[
@@ -142,6 +146,29 @@ struct MakeRequest {
     tasks: String,
     /// The kind of request
     kind: RequestType,
+    /// How long the request should last for before becoming archived (examples: 1 min, 2 hours)
+    expires_in: Option<HumanDuration>,
+}
+
+struct HumanDuration(Duration);
+
+impl SlashArg for HumanDuration {
+    fn arg_parse(
+        arg: Option<&serenity::model::prelude::application_command::CommandDataOption>,
+    ) -> Result<Self, slashery::ArgFromInteractionError> {
+        Ok(HumanDuration(
+            humantime::parse_duration(arg.unwrap().value.as_ref().unwrap().as_str().unwrap())
+                .unwrap(),
+        ))
+    }
+
+    fn arg_discord_type() -> serenity::model::prelude::command::CommandOptionType {
+        serenity::model::application::command::CommandOptionType::String
+    }
+
+    fn arg_required() -> bool {
+        true
+    }
 }
 
 #[derive(SlashCmd)]
@@ -248,6 +275,9 @@ impl Handler {
             created_by: Set(user.id),
             discord_channel_id: Set(Some(cmd.channel_id.0 as i64)),
             thumbnail_url: Set(req.kind.thumbnail().map(str::to_string)),
+            expires_on: Set(req
+                .expires_in
+                .map(|expires_in| OffsetDateTime::now_utc() + expires_in.0)),
             // We only know the message ID once it has been created, so defer until after
             // discord_message_id: Set(cmd.id.0 as i64),
             ..Default::default()
@@ -412,7 +442,7 @@ async fn archive_request_if_required(
     db: &DatabaseConnection,
     request_id: Uuid,
     comp: Option<&MessageComponentInteraction>,
-    ctx: &serenity::prelude::Context,
+    discord: &impl serenity::http::CacheHttp,
 ) -> ArchiveResult {
     let request = request::Entity::find_by_id(request_id)
         .one(db)
@@ -431,7 +461,10 @@ async fn archive_request_if_required(
         return ArchiveResult::AlreadyArchived;
     }
     let tasks = request.find_related(task::Entity).all(db).await.unwrap();
-    let request_completed = tasks.iter().all(|t| t.completed_at.is_some());
+    let request_completed = request
+        .expires_on
+        .map_or(false, |e| e < OffsetDateTime::now_utc())
+        || tasks.iter().all(|t| t.completed_at.is_some());
     let archive_channel = if request_completed {
         archive_rule::Entity::find_by_id(from_channel.0 as i64)
             .one(db)
@@ -454,17 +487,19 @@ async fn archive_request_if_required(
 
     // try to move request to archive channel, otherwise archive in-place
     if let Some(archive_channel) = archive_channel {
-        let archive_channel = ctx
-            .cache
-            .guild_channel(archive_channel)
-            .expect("archive channel not found");
+        let archive_channel = archive_channel
+            .to_channel(discord)
+            .await
+            .unwrap()
+            .guild()
+            .unwrap();
         let rendered = render_request(db, request_id).await;
         let archived_msg = archive_channel
-            .send_message(&ctx, |msg| rendered.create_message(msg))
+            .send_message(discord.http(), |msg| rendered.create_message(msg))
             .await
             .unwrap();
         if let Some(comp) = comp {
-            comp.create_interaction_response(&ctx.http, |msg| {
+            comp.create_interaction_response(discord.http(), |msg| {
                 msg.interaction_response_data(|r| {
                     r.ephemeral(true).content(format!(
                         "Request has been archived, see {}",
@@ -478,12 +513,12 @@ async fn archive_request_if_required(
         // apparently the interaction message counts as a followup, which should avoid
         // requiring permission to see the channel
         if let Some(comp) = comp {
-            comp.delete_followup_message(&ctx.http, comp.message.id)
+            comp.delete_followup_message(&discord.http(), comp.message.id)
                 .await
                 .unwrap();
         } else {
             from_channel
-                .delete_message(&ctx.http, message_id)
+                .delete_message(&discord.http(), message_id)
                 .await
                 .unwrap();
         }
@@ -498,12 +533,14 @@ async fn archive_request_if_required(
     } else {
         let rendered = render_request(db, request_id).await;
         if let Some(comp) = comp {
-            comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
-                .await
-                .unwrap();
+            comp.edit_original_message(&discord.http(), |r| {
+                rendered.create_interaction_response(r)
+            })
+            .await
+            .unwrap();
         } else {
             from_channel
-                .edit_message(&ctx.http, message_id, |r| rendered.edit_message(r))
+                .edit_message(&discord.http(), message_id, |r| rendered.edit_message(r))
                 .await
                 .unwrap();
         }
@@ -531,7 +568,7 @@ async fn main() -> Result<(), snafu::Whatever> {
         .whatever_context("failed to apply migrations")?;
     let mut discord = serenity::Client::builder(&opts.discord_token, GatewayIntents::GUILDS)
         .application_id(opts.discord_app_id)
-        .event_handler(Handler { db })
+        .event_handler(Handler { db: db.clone() })
         .await
         .whatever_context("failed to build discord client")?;
     discord
@@ -543,10 +580,17 @@ async fn main() -> Result<(), snafu::Whatever> {
         )
         .await
         .whatever_context("failed to create discord commands")?;
-    discord
-        .start()
-        .await
-        .whatever_context("failed to run discord bot")?;
+    let discord_ctx = Arc::clone(&discord.cache_and_http);
+    futures::future::select_ok([
+        discord
+            .start()
+            .whatever_context("failed to run discord bot")
+            .boxed_local(),
+        expiration_controller::run(&db, &discord_ctx)
+            .map(Ok)
+            .boxed_local(),
+    ])
+    .await?;
     Ok(())
 }
 
@@ -598,8 +642,14 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
             Some(format!("# {}\n", request.title)),
             request.archived_on.map(|archived_on| {
                 format!(
-                    "Archived on <t:{ts}> (<t:{ts}:R>)",
+                    "Archived on <t:{ts}> (<t:{ts}:R>)\n",
                     ts = archived_on.unix_timestamp()
+                )
+            }),
+            request.expires_on.map(|expires_on| {
+                format!(
+                    "Expires on <t:{ts}> (<t:{ts}:R>)\n",
+                    ts = expires_on.unix_timestamp()
                 )
             }),
         ]
@@ -651,10 +701,14 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
         },
         components: {
             let mut components = CreateComponents::default();
-            let uncompleted_tasks = tasks
-                .iter()
-                .filter(|(task, _)| task.completed_at.is_none())
-                .collect::<Vec<_>>();
+            let uncompleted_tasks = if request.archived_on.is_none() {
+                tasks
+                    .iter()
+                    .filter(|(task, _)| task.completed_at.is_none())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let (claimed_tasks, unclaimed_tasks) = uncompleted_tasks
                 .iter()
                 .copied()

@@ -5,6 +5,7 @@ mod m20231209_000613_create_archive_rules_table;
 mod m20231209_005830_add_request_channel;
 mod m20231209_013836_add_request_thumbnail;
 mod m20231219_195822_add_request_archival_flag;
+mod m20231219_210033_add_request_expiration_timer;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20231209_005830_add_request_channel::Migration),
             Box::new(m20231209_013836_add_request_thumbnail::Migration),
             Box::new(m20231219_195822_add_request_archival_flag::Migration),
+            Box::new(m20231219_210033_add_request_expiration_timer::Migration),
         ]
     }
 }
