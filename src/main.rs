@@ -392,6 +392,9 @@ impl Handler {
             created_by: Set(user.id),
             discord_channel_id: Set(Some(channel.id.0 as i64)),
             thumbnail_url: Set(original_request.thumbnail_url),
+            expires_on: Set(original_request.expires_on.map(|expires_on| {
+                OffsetDateTime::now_utc() + (expires_on - original_request.created_at)
+            })),
             ..Default::default()
         }
         .insert(&self.db)
