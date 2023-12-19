@@ -321,14 +321,23 @@ impl Handler {
         let request_id = updated_tasks.get(0).expect("no updated task").request;
 
         // try to archive if required
-        let rendered = render_request(&self.db, request_id).await;
         if let Some(archive_channel) =
             should_archive_request_to(&self.db, request_id, comp.channel_id).await
         {
+            request::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(request_id),
+                archived_on: Set(Some(OffsetDateTime::now_utc())),
+                ..Default::default()
+            }
+            .update(&self.db)
+            .await
+            .unwrap();
+
             let archive_channel = ctx
                 .cache
                 .guild_channel(archive_channel)
                 .expect("archive channel not found");
+            let rendered = render_request(&self.db, request_id).await;
             let archived_msg = archive_channel
                 .send_message(&ctx, |msg| rendered.create_message(msg))
                 .await
@@ -351,7 +360,6 @@ impl Handler {
             request::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(request_id),
                 discord_message_id: Set(Some(archived_msg.id.0 as i64)),
-                archived_on: Set(Some(OffsetDateTime::now_utc())),
                 ..Default::default()
             }
             .update(&self.db)
@@ -360,6 +368,7 @@ impl Handler {
             return;
         }
 
+        let rendered = render_request(&self.db, request_id).await;
         comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
             .await
             .unwrap();
@@ -541,7 +550,18 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
     };
 
     RenderedRequest {
-        content: format!("# {}", request.title),
+        content: [
+            Some(format!("# {}\n", request.title)),
+            request.archived_on.map(|archived_on| {
+                format!(
+                    "Archived on <t:{ts}> (<t:{ts}:R>)",
+                    ts = archived_on.unix_timestamp()
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<String>(),
         embed: {
             let mut embed = CreateEmbed::default();
             embed.title("Tasks").footer(|f| f.text(quip)).description(
