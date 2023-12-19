@@ -20,14 +20,14 @@ use serde::{de::IntoDeserializer, Deserialize};
 use serenity::{
     builder::{
         CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage,
-        EditInteractionResponse,
+        EditInteractionResponse, EditMessage,
     },
     model::{
         application::{
             command::CommandOptionChoice,
             interaction::message_component::MessageComponentInteraction,
         },
-        id::ChannelId,
+        id::{ChannelId, MessageId},
         prelude::{
             interaction::{application_command::ApplicationCommandInteraction, Interaction},
             UserId,
@@ -320,51 +320,9 @@ impl Handler {
             .unwrap();
         let request_id = updated_tasks.get(0).expect("no updated task").request;
 
-        // try to archive if required
-        if let Some(archive_channel) =
-            should_archive_request_to(&self.db, request_id, comp.channel_id).await
+        if archive_request_if_required(&self.db, request_id, Some(&comp), &ctx).await
+            == ArchiveResult::Archived
         {
-            request::ActiveModel {
-                id: sea_orm::ActiveValue::Unchanged(request_id),
-                archived_on: Set(Some(OffsetDateTime::now_utc())),
-                ..Default::default()
-            }
-            .update(&self.db)
-            .await
-            .unwrap();
-
-            let archive_channel = ctx
-                .cache
-                .guild_channel(archive_channel)
-                .expect("archive channel not found");
-            let rendered = render_request(&self.db, request_id).await;
-            let archived_msg = archive_channel
-                .send_message(&ctx, |msg| rendered.create_message(msg))
-                .await
-                .unwrap();
-            comp.create_interaction_response(&ctx.http, |msg| {
-                msg.interaction_response_data(|r| {
-                    r.ephemeral(true).content(format!(
-                        "Request has been archived, see {}",
-                        archived_msg.link()
-                    ))
-                })
-            })
-            .await
-            .unwrap();
-            // apparently the interaction message counts as a followup, which should avoid
-            // requiring permission to see the channel
-            comp.delete_followup_message(&ctx.http, comp.message.id)
-                .await
-                .unwrap();
-            request::ActiveModel {
-                id: sea_orm::ActiveValue::Unchanged(request_id),
-                discord_message_id: Set(Some(archived_msg.id.0 as i64)),
-                ..Default::default()
-            }
-            .update(&self.db)
-            .await
-            .unwrap();
             return;
         }
 
@@ -443,29 +401,115 @@ impl Handler {
     }
 }
 
-async fn should_archive_request_to(
+#[derive(PartialEq, Eq)]
+enum ArchiveResult {
+    Archived,
+    AlreadyArchived,
+    NotReadyToArchiveYet,
+}
+
+async fn archive_request_if_required(
     db: &DatabaseConnection,
     request_id: Uuid,
-    from_channel: ChannelId,
-) -> Option<ChannelId> {
+    comp: Option<&MessageComponentInteraction>,
+    ctx: &serenity::prelude::Context,
+) -> ArchiveResult {
     let request = request::Entity::find_by_id(request_id)
         .one(db)
         .await
         .unwrap()
         .expect("request not found");
+    let (message_id, from_channel) = if let Some(comp) = comp {
+        (comp.message.id, comp.channel_id)
+    } else {
+        (
+            MessageId(request.discord_message_id.unwrap() as u64),
+            ChannelId(request.discord_channel_id.unwrap() as u64),
+        )
+    };
     if request.archived_on.is_some() {
-        return None;
+        return ArchiveResult::AlreadyArchived;
     }
     let tasks = request.find_related(task::Entity).all(db).await.unwrap();
-    if tasks.iter().all(|t| t.completed_at.is_some()) {
+    let request_completed = tasks.iter().all(|t| t.completed_at.is_some());
+    let archive_channel = if request_completed {
         archive_rule::Entity::find_by_id(from_channel.0 as i64)
             .one(db)
             .await
             .unwrap()
             .map(|rule| ChannelId(rule.to_channel as u64))
     } else {
-        None
+        return ArchiveResult::NotReadyToArchiveYet;
+    };
+
+    // mark request as archived
+    request::ActiveModel {
+        id: sea_orm::ActiveValue::Unchanged(request_id),
+        archived_on: Set(Some(OffsetDateTime::now_utc())),
+        ..Default::default()
     }
+    .update(db)
+    .await
+    .unwrap();
+
+    // try to move request to archive channel, otherwise archive in-place
+    if let Some(archive_channel) = archive_channel {
+        let archive_channel = ctx
+            .cache
+            .guild_channel(archive_channel)
+            .expect("archive channel not found");
+        let rendered = render_request(db, request_id).await;
+        let archived_msg = archive_channel
+            .send_message(&ctx, |msg| rendered.create_message(msg))
+            .await
+            .unwrap();
+        if let Some(comp) = comp {
+            comp.create_interaction_response(&ctx.http, |msg| {
+                msg.interaction_response_data(|r| {
+                    r.ephemeral(true).content(format!(
+                        "Request has been archived, see {}",
+                        archived_msg.link()
+                    ))
+                })
+            })
+            .await
+            .unwrap();
+        }
+        // apparently the interaction message counts as a followup, which should avoid
+        // requiring permission to see the channel
+        if let Some(comp) = comp {
+            comp.delete_followup_message(&ctx.http, comp.message.id)
+                .await
+                .unwrap();
+        } else {
+            from_channel
+                .delete_message(&ctx.http, message_id)
+                .await
+                .unwrap();
+        }
+        request::ActiveModel {
+            id: sea_orm::ActiveValue::Unchanged(request_id),
+            discord_message_id: Set(Some(archived_msg.id.0 as i64)),
+            ..Default::default()
+        }
+        .update(db)
+        .await
+        .unwrap();
+    } else {
+        let rendered = render_request(db, request_id).await;
+        if let Some(comp) = comp {
+            comp.edit_original_message(&ctx.http, |r| rendered.create_interaction_response(r))
+                .await
+                .unwrap();
+        } else {
+            from_channel
+                .edit_message(&ctx.http, message_id, |r| rendered.edit_message(r))
+                .await
+                .unwrap();
+        }
+    }
+
+    ArchiveResult::Archived
 }
 
 #[derive(PartialEq, Eq)]
@@ -709,6 +753,12 @@ impl RenderedRequest {
     }
 
     fn create_message<'a, 'b>(self, r: &'a mut CreateMessage<'b>) -> &'a mut CreateMessage<'b> {
+        r.content(self.content)
+            .set_embed(self.embed)
+            .set_components(self.components)
+    }
+
+    fn edit_message<'a, 'b>(self, r: &'a mut EditMessage<'b>) -> &'a mut EditMessage<'b> {
         r.content(self.content)
             .set_embed(self.embed)
             .set_components(self.components)
