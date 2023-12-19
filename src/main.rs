@@ -144,9 +144,15 @@ struct MakeRequest {
     kind: RequestType,
 }
 
+#[derive(SlashCmd)]
+#[slashery(name = "scopecreep", kind = "SlashCmdType::ChatInput")]
+/// SCOPE CREEP
+struct ScopeCreep {}
+
 #[derive(SlashCmds)]
 enum Cmd {
     MakeRequest(MakeRequest),
+    ScopeCreep(ScopeCreep),
 }
 
 #[derive(SlashComponents)]
@@ -176,6 +182,7 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd).unwrap() {
                 Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
+                Cmd::ScopeCreep(req) => self.scope_creep(cmd, req, ctx).await,
             },
             Interaction::MessageComponent(comp) => {
                 match Component::from_interaction(&comp).unwrap() {
@@ -200,6 +207,20 @@ impl EventHandler for Handler {
 }
 
 impl Handler {
+    async fn scope_creep(
+        &self,
+        cmd: ApplicationCommandInteraction,
+        _req: ScopeCreep,
+        ctx: serenity::prelude::Context,
+    ) {
+        let url = "https://cdn.discordapp.com/attachments/1144367081740042380/1186582003676622848/IMG_7437.gif";
+        cmd.create_interaction_response(&ctx.http, |r| {
+            r.interaction_response_data(|r| r.content(url))
+        })
+        .await
+        .unwrap();
+    }
+
     async fn make_request(
         &self,
         cmd: ApplicationCommandInteraction,
