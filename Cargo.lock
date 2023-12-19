@@ -2622,7 +2622,7 @@ dependencies = [
 [[package]]
 name = "slashery"
 version = "0.1.0"
-source = "git+https://github.com/nightkr/slashery#9f3e5191115905284bcd86c4d0c49886c6e849ce"
+source = "git+https://github.com/nightkr/slashery#1a567f728cdacfa506a623a8116d72eef3d0afbc"
 dependencies = [
  "serde",
  "serde_json",
@@ -2635,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "slashery-derive"
 version = "0.1.0"
-source = "git+https://github.com/nightkr/slashery#9f3e5191115905284bcd86c4d0c49886c6e849ce"
+source = "git+https://github.com/nightkr/slashery#1a567f728cdacfa506a623a8116d72eef3d0afbc"
 dependencies = [
  "darling",
  "proc-macro2",

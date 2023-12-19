@@ -38,8 +38,11 @@ use serenity::{
     },
     prelude::{EventHandler, GatewayIntents},
 };
-use slashery::{SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds, SlashComponents};
-use snafu::{futures::TryFutureExt as _, ResultExt};
+use slashery::{
+    ArgFromInteractionError, SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds,
+    SlashComponents,
+};
+use snafu::{futures::TryFutureExt as _, Report, ResultExt};
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
 
@@ -105,10 +108,11 @@ impl SlashArg for RequestType {
         arg: Option<&serenity::model::prelude::application_command::CommandDataOption>,
     ) -> Result<Self, slashery::ArgFromInteractionError> {
         let arg = String::arg_parse(arg)?;
-        RequestType::from_str(&arg).map_err(|_| {
+        RequestType::from_str(&arg).map_err(|err| {
             slashery::ArgFromInteractionError::InvalidValueForType {
                 expected: serenity::model::application::command::CommandOptionType::String,
                 got: arg.into(),
+                message: Some(err.to_string()),
             }
         })
     }
@@ -156,10 +160,14 @@ impl SlashArg for HumanDuration {
     fn arg_parse(
         arg: Option<&serenity::model::prelude::application_command::CommandDataOption>,
     ) -> Result<Self, slashery::ArgFromInteractionError> {
-        Ok(HumanDuration(
-            humantime::parse_duration(arg.unwrap().value.as_ref().unwrap().as_str().unwrap())
-                .unwrap(),
-        ))
+        let arg = String::arg_parse(arg)?;
+        humantime::parse_duration(&arg).map(Self).map_err(|err| {
+            ArgFromInteractionError::InvalidValueForType {
+                expected: serenity::model::application::command::CommandOptionType::String,
+                got: serde_json::Value::String(arg),
+                message: Some(err.to_string()),
+            }
+        })
     }
 
     fn arg_discord_type() -> serenity::model::prelude::command::CommandOptionType {
@@ -207,9 +215,17 @@ impl EventHandler for Handler {
         interaction: serenity::model::prelude::interaction::Interaction,
     ) {
         match interaction {
-            Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd).unwrap() {
-                Cmd::MakeRequest(req) => self.make_request(cmd, req, ctx).await,
-                Cmd::ScopeCreep(req) => self.scope_creep(cmd, req, ctx).await,
+            Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd) {
+                Ok(Cmd::MakeRequest(req)) => self.make_request(cmd, req, ctx).await,
+                Ok(Cmd::ScopeCreep(req)) => self.scope_creep(cmd, req, ctx).await,
+                Err(err) => cmd
+                    .create_interaction_response(&ctx, |r| {
+                        r.interaction_response_data(|r| {
+                            r.ephemeral(true).content(Report::from_error(err))
+                        })
+                    })
+                    .await
+                    .unwrap(),
             },
             Interaction::MessageComponent(comp) => {
                 match Component::from_interaction(&comp).unwrap() {
