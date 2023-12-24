@@ -70,6 +70,7 @@ const QUIPS: &[&str] = &[
     "SCOPE CREEP",
     "Daily reminder to press W",
     "Daily reminder to set your MPF queues",
+    "Sledges will tech in 15 minutes",
 ];
 
 #[derive(clap::Parser)]
