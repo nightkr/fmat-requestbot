@@ -71,6 +71,7 @@ const QUIPS: &[&str] = &[
     "Daily reminder to press W",
     "Daily reminder to set your MPF queues",
     "Sledges will tech in 15 minutes",
+    "And our MPF champion is... CRIPPLING DEPRESSION!",
 ];
 
 #[derive(clap::Parser)]
