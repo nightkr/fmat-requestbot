@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use entity::request;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use serenity::{client::Context, CacheAndHttp};
+use serenity::CacheAndHttp;
 use time::OffsetDateTime;
 
 use crate::archive_request_if_required;

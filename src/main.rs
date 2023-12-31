@@ -7,10 +7,9 @@ use std::{
 };
 
 use clap::Parser;
-use entity::{archive_rule, request, task, user};
+use entity::{archive_rule, request, request_schedule, task, user};
 use futures::FutureExt;
 use migration::MigratorTrait;
-use regex::Regex;
 use sea_orm::{
     prelude::Uuid,
     sea_query::OnConflict,
@@ -45,8 +44,11 @@ use slashery::{
 use snafu::{futures::TryFutureExt as _, Report, ResultExt};
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
+use tracing_subscriber::EnvFilter;
+use utils::parse_tasks;
 
 mod expiration_controller;
+mod schedule_controller;
 mod utils;
 
 const QUIPS: &[&str] = &[
@@ -154,6 +156,20 @@ struct MakeRequest {
     expires_in: Option<HumanDuration>,
 }
 
+#[derive(SlashCmd)]
+#[slashery(name = "schedule-request", kind = "SlashCmdType::ChatInput")]
+/// Schedule a request to happen on a schedule
+struct ScheduleRequest {
+    /// A summary of the request
+    title: String,
+    /// One or more tasks to be completed, separated by `;`
+    tasks: String,
+    /// The kind of request
+    kind: RequestType,
+    /// How long to wait between each request (examples: 1 min, 2 hours)
+    interval: HumanDuration,
+}
+
 struct HumanDuration(Duration);
 
 impl SlashArg for HumanDuration {
@@ -187,6 +203,7 @@ struct ScopeCreep {}
 #[derive(SlashCmds)]
 enum Cmd {
     MakeRequest(MakeRequest),
+    ScheduleRequest(ScheduleRequest),
     ScopeCreep(ScopeCreep),
 }
 
@@ -217,6 +234,7 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd) {
                 Ok(Cmd::MakeRequest(req)) => self.make_request(cmd, req, ctx).await,
+                Ok(Cmd::ScheduleRequest(req)) => self.schedule_request(cmd, req, ctx).await,
                 Ok(Cmd::ScopeCreep(req)) => self.scope_creep(cmd, req, ctx).await,
                 Err(err) => cmd
                     .create_interaction_response(&ctx, |r| {
@@ -270,21 +288,7 @@ impl Handler {
         req: MakeRequest,
         ctx: serenity::prelude::Context,
     ) {
-        let multiply_regex = Regex::new(r"(?:\{(\d+)x\}|())(.*)").unwrap();
-        let tasks = req
-            .tasks
-            .split(';')
-            .filter(|task| !task.is_empty())
-            .flat_map(|task| {
-                let (_, [multiplier, task]) = multiply_regex
-                    .captures(task.trim())
-                    .expect("task did not match regex")
-                    .extract();
-                let multiplier = Some(multiplier)
-                    .filter(|x| !str::is_empty(x))
-                    .map_or(1, |x| x.parse::<usize>().unwrap());
-                std::iter::repeat(task.trim()).take(multiplier)
-            });
+        let tasks = parse_tasks(&req.tasks);
         let user = get_user_by_discord(&self.db, cmd.user.id).await.unwrap();
         let request = request::ActiveModel {
             title: Set(req.title),
@@ -328,6 +332,51 @@ impl Handler {
 
         let response_message = cmd.get_interaction_response(&ctx.http).await.unwrap();
         request::ActiveModel {
+            discord_message_id: Set(Some(response_message.id.0 as i64)),
+            ..request.into()
+        }
+        .update(&self.db)
+        .await
+        .unwrap();
+    }
+
+    async fn schedule_request(
+        &self,
+        cmd: ApplicationCommandInteraction,
+        req: ScheduleRequest,
+        ctx: serenity::prelude::Context,
+    ) {
+        let user = get_user_by_discord(&self.db, cmd.user.id).await.unwrap();
+        let request = request_schedule::ActiveModel {
+            seconds_between_requests: Set(req.interval.0.as_secs() as i32),
+            title: Set(req.title.clone()),
+            tasks: Set(parse_tasks(&req.tasks).map(str::to_string).collect()),
+            created_by: Set(user.id),
+            discord_channel_id: Set(cmd.channel_id.0 as i64),
+            thumbnail_url: Set(req.kind.thumbnail().map(str::to_string)),
+            // We only know the message ID once it has been created, so defer until after
+            // discord_message_id: Set(cmd.id.0 as i64),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .unwrap();
+
+        cmd.create_interaction_response(&ctx.http, |r| {
+            r.interaction_response_data(|r| {
+                r.content(format!(
+                    "Request schedule created by <@{user}>\nTitle: {title}\nExecutes every {interval}",
+                    user = user.discord_user_id,
+                    title = req.title,
+                    interval = humantime::format_duration(req.interval.0),
+                ))
+            })
+        })
+        .await
+        .unwrap();
+
+        let response_message = cmd.get_interaction_response(&ctx.http).await.unwrap();
+        request_schedule::ActiveModel {
             discord_message_id: Set(Some(response_message.id.0 as i64)),
             ..request.into()
         }
@@ -578,6 +627,9 @@ enum TaskState {
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), snafu::Whatever> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     let opts = Opts::parse();
     let db = Database::connect(opts.database_url)
         .await
@@ -606,6 +658,9 @@ async fn main() -> Result<(), snafu::Whatever> {
             .whatever_context("failed to run discord bot")
             .boxed_local(),
         expiration_controller::run(&db, &discord_ctx)
+            .map(Ok)
+            .boxed_local(),
+        schedule_controller::run(&db, &discord_ctx)
             .map(Ok)
             .boxed_local(),
     ])
@@ -648,6 +703,11 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
         .order_by_asc(task::Column::Weight)
         .find_with_related(user::Entity)
         .all(db)
+        .await
+        .unwrap();
+    let schedule = request
+        .find_related(request_schedule::Entity)
+        .one(db)
         .await
         .unwrap();
 
@@ -707,10 +767,19 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                         ]
                     })
                     .flatten()
-                    .chain([format!(
-                        "*Requested by <@{}>*",
-                        task_created_by.discord_user_id
-                    )])
+                    .chain([
+                        format!("*Requested by <@{}>", task_created_by.discord_user_id),
+                        schedule
+                            .and_then(|schedule| {
+                                Some(format!(
+                                    " via schedule {}",
+                                    MessageId(schedule.discord_message_id? as u64)
+                                        .link(ChannelId(schedule.discord_channel_id as u64), None)
+                                ))
+                            })
+                            .unwrap_or_default(),
+                        "*".to_string(),
+                    ])
                     .collect::<String>(),
             );
             if let Some(thumbnail_url) = &request.thumbnail_url {

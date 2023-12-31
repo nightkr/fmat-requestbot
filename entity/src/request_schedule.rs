@@ -3,34 +3,26 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "request")]
+#[sea_orm(table_name = "request_schedule")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub created_by: Uuid,
     pub created_at: TimeDateTimeWithTimeZone,
+    pub disabled_at: Option<TimeDateTimeWithTimeZone>,
     #[sea_orm(unique)]
     pub discord_message_id: Option<i64>,
+    pub discord_channel_id: i64,
+    pub seconds_between_requests: i32,
     pub title: String,
-    pub discord_channel_id: Option<i64>,
+    pub tasks: Vec<String>,
     pub thumbnail_url: Option<String>,
-    pub archived_on: Option<TimeDateTimeWithTimeZone>,
-    pub expires_on: Option<TimeDateTimeWithTimeZone>,
-    pub created_by_schedule: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::request_schedule::Entity",
-        from = "Column::CreatedBySchedule",
-        to = "super::request_schedule::Column::Id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    RequestSchedule,
-    #[sea_orm(has_many = "super::task::Entity")]
-    Task,
+    #[sea_orm(has_many = "super::request::Entity")]
+    Request,
     #[sea_orm(
         belongs_to = "super::user::Entity",
         from = "Column::CreatedBy",
@@ -41,15 +33,9 @@ pub enum Relation {
     User,
 }
 
-impl Related<super::request_schedule::Entity> for Entity {
+impl Related<super::request::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::RequestSchedule.def()
-    }
-}
-
-impl Related<super::task::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Task.def()
+        Relation::Request.def()
     }
 }
 

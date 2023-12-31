@@ -16,6 +16,8 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::request::Entity")]
     Request,
+    #[sea_orm(has_many = "super::request_schedule::Entity")]
+    RequestSchedule,
     #[sea_orm(has_many = "super::task::Entity")]
     Task,
 }
@@ -23,6 +25,12 @@ pub enum Relation {
 impl Related<super::request::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Request.def()
+    }
+}
+
+impl Related<super::request_schedule::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::RequestSchedule.def()
     }
 }
 

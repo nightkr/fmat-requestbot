@@ -1,8 +1,31 @@
-use std::{
-    fmt::Display,
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::sync::OnceLock;
+
+use regex::Regex;
+
+pub fn parse_tasks(tasks: &str) -> impl Iterator<Item = &str> {
+    static MULTIPLY_REGEX: OnceLock<Regex> = OnceLock::new();
+    let multiply_regex =
+        MULTIPLY_REGEX.get_or_init(|| Regex::new(r"(?:\{(\d+)x\}|())(.*)").unwrap());
+    tasks
+        .split(';')
+        .filter(|task| !task.is_empty())
+        .flat_map(|task| {
+            let (_, [multiplier, task]) = multiply_regex
+                .captures(task.trim())
+                .expect("task did not match regex")
+                .extract();
+            let multiplier = Some(multiplier)
+                .filter(|x| !str::is_empty(x))
+                .map_or(1, |x| x.parse::<usize>().unwrap());
+            std::iter::repeat(task.trim()).take(multiplier)
+        })
+}
+
+// use std::{
+//     fmt::Display,
+//     future::Future,
+//     sync::{Arc, Mutex},
+// };
 
 // pub async fn report_command_result<
 //     E: Display,

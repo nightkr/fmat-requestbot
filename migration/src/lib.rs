@@ -6,6 +6,7 @@ mod m20231209_005830_add_request_channel;
 mod m20231209_013836_add_request_thumbnail;
 mod m20231219_195822_add_request_archival_flag;
 mod m20231219_210033_add_request_expiration_timer;
+mod m20231219_222103_add_request_schedule;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20231209_013836_add_request_thumbnail::Migration),
             Box::new(m20231219_195822_add_request_archival_flag::Migration),
             Box::new(m20231219_210033_add_request_expiration_timer::Migration),
+            Box::new(m20231219_222103_add_request_schedule::Migration),
         ]
     }
 }

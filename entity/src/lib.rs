@@ -4,5 +4,6 @@ pub mod prelude;
 
 pub mod archive_rule;
 pub mod request;
+pub mod request_schedule;
 pub mod task;
 pub mod user;

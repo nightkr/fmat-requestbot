@@ -21,6 +21,8 @@ snafu = { version = "0.7.5", features = ["futures"] }
 strum = { version = "0.25.0", features = ["derive"] }
 time = "0.3.30"
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 [workspace]
 members = ["migration", "entity"]
