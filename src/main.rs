@@ -7,7 +7,7 @@ use std::{
 };
 
 use clap::Parser;
-use entity::{archive_rule, request, task, user};
+use entity::{archive_rule, delivery, delivery_item, request, task, user};
 use futures::FutureExt;
 use migration::MigratorTrait;
 use regex::Regex;
@@ -186,10 +186,35 @@ impl SlashArg for HumanDuration {
 /// SCOPE CREEP
 struct ScopeCreep {}
 
+#[derive(SlashCmd)]
+#[slashery(name = "delivery", kind = "SlashCmdType::ChatInput")]
+/// Record a delivery made
+struct MakeDelivery {
+    /// The recipient of the delivery, such as WarEco or FEARS
+    recipient: String,
+    /// The amount of cmats pallets delivered
+    cmats: Option<i32>,
+    /// The amount of pcons pallets delivered
+    pcons: Option<i32>,
+    /// The amount of steel pallets delivered
+    steel: Option<i32>,
+    /// The amount of ass1 pallets delivered
+    ass1: Option<i32>,
+    /// The amount of ass2 pallets delivered
+    ass2: Option<i32>,
+    /// The amount of ass3 pallets delivered
+    ass3: Option<i32>,
+    /// The amount of ass4 pallets delivered
+    ass4: Option<i32>,
+    /// The amount of ass5 pallets delivered
+    ass5: Option<i32>,
+}
+
 #[derive(SlashCmds)]
 enum Cmd {
     MakeRequest(MakeRequest),
     ScopeCreep(ScopeCreep),
+    MakeDelivery(MakeDelivery),
 }
 
 #[derive(SlashComponents)]
@@ -219,6 +244,7 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::ApplicationCommand(cmd) => match Cmd::from_interaction(&cmd) {
                 Ok(Cmd::MakeRequest(req)) => self.make_request(cmd, req, ctx).await,
+                Ok(Cmd::MakeDelivery(req)) => self.make_delivery(cmd, req, ctx).await,
                 Ok(Cmd::ScopeCreep(req)) => self.scope_creep(cmd, req, ctx).await,
                 Err(err) => cmd
                     .create_interaction_response(&ctx, |r| {
@@ -262,6 +288,71 @@ impl Handler {
         cmd.create_interaction_response(&ctx.http, |r| {
             r.interaction_response_data(|r| r.content(url))
         })
+        .await
+        .unwrap();
+    }
+
+    async fn make_delivery(
+        &self,
+        cmd: ApplicationCommandInteraction,
+        req: MakeDelivery,
+        ctx: serenity::prelude::Context,
+    ) {
+        let user = get_user_by_discord(&self.db, cmd.user.id).await.unwrap();
+        let delivery = delivery::ActiveModel {
+            created_by: Set(user.id),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await
+        .unwrap();
+        let delivered_items = [
+            (req.cmats, "cmats"),
+            (req.pcons, "pcons"),
+            (req.steel, "steel"),
+            (req.ass1, "assmat 1"),
+            (req.ass2, "assmat 2"),
+            (req.ass3, "assmat 3"),
+            (req.ass4, "assmat 4"),
+            (req.ass5, "assmat 5"),
+        ]
+        .into_iter()
+        .filter_map(|(amount, item_name)| Some((amount?, item_name)))
+        .collect::<Vec<_>>();
+        delivery_item::Entity::insert_many(delivered_items.iter().map(|(amount, item_name)| {
+            delivery_item::ActiveModel {
+                delivery: Set(delivery.id),
+                item_name: Set(item_name.to_string()),
+                amount: Set(*amount),
+                ..Default::default()
+            }
+        }))
+        .exec(&self.db)
+        .await
+        .unwrap();
+        cmd.create_interaction_response(&ctx.http, |r| {
+            r.interaction_response_data(|r| {
+                use std::fmt::Write;
+                let mut content = format!(
+                    "# New delivery by <@{from}> to **{to}**",
+                    from = cmd.user.id,
+                    to = req.recipient
+                );
+                for (amount, item_name) in delivered_items {
+                    write!(content, "\n- {amount} pallets of {item_name}").unwrap();
+                }
+                r.content(content)
+            })
+        })
+        .await
+        .unwrap();
+
+        let response_message = cmd.get_interaction_response(&ctx.http).await.unwrap();
+        delivery::ActiveModel {
+            discord_message_id: Set(Some(response_message.id.0 as i64)),
+            ..delivery.into()
+        }
+        .update(&self.db)
         .await
         .unwrap();
     }

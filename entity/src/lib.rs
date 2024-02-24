@@ -3,6 +3,8 @@
 pub mod prelude;
 
 pub mod archive_rule;
+pub mod delivery;
+pub mod delivery_item;
 pub mod request;
 pub mod task;
 pub mod user;
