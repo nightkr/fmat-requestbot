@@ -730,7 +730,14 @@ enum TaskState {
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), snafu::Whatever> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::INFO.into())
+                .from_env()
+                .whatever_context("invalid log filter")?,
+        )
+        .init();
     let opts = Opts::parse();
     let db = Database::connect(opts.database_url)
         .await
