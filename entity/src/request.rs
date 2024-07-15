@@ -16,6 +16,7 @@ pub struct Model {
     pub thumbnail_url: Option<String>,
     pub archived_on: Option<TimeDateTimeWithTimeZone>,
     pub expires_on: Option<TimeDateTimeWithTimeZone>,
+    pub discord_guild_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

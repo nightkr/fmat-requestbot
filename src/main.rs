@@ -383,6 +383,7 @@ impl Handler {
             title: Set(req.title),
             created_by: Set(user.id),
             discord_channel_id: Set(Some(cmd.channel_id.0 as i64)),
+            discord_guild_id: Set(cmd.guild_id.map(|g| g.0 as i64)),
             thumbnail_url: Set(req.kind.thumbnail().map(str::to_string)),
             expires_on: Set(req
                 .expires_in
