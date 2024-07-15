@@ -25,6 +25,8 @@ async fn run_turn(db: &DatabaseConnection, discord: &CacheAndHttp) {
         .await
         .unwrap();
     for req in expiring_requests {
-        archive_request_if_required(db, req.id, None, discord).await;
+        if let Err(err) = archive_request_if_required(db, req.id, None, discord).await {
+            tracing::error!(error = &err as &dyn std::error::Error, request.id = %req.id, "failed to process request expiration, ignoring...");
+        }
     }
 }

@@ -42,7 +42,7 @@ use slashery::{
     ArgFromInteractionError, SlashArg, SlashArgs, SlashCmd, SlashCmdType, SlashCmds,
     SlashComponents,
 };
-use snafu::{futures::TryFutureExt as _, Report, ResultExt};
+use snafu::{futures::TryFutureExt as _, OptionExt, Report, ResultExt, Snafu};
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
 
@@ -459,10 +459,14 @@ impl Handler {
             .unwrap();
         let request_id = updated_tasks.get(0).expect("no updated task").request;
 
-        if archive_request_if_required(&self.db, request_id, Some(&comp), &ctx).await
-            == ArchiveResult::Archived
-        {
-            return;
+        match archive_request_if_required(&self.db, request_id, Some(&comp), &ctx).await {
+            Ok(ArchiveResult::Archived) => return,
+            Err(err) => tracing::error!(
+                error = &err as &dyn std::error::Error,
+                request.id = %request_id,
+                "failed to process whether to archive request, ignoring..."
+            ),
+            _ => (),
         }
 
         let rendered = render_request(&self.db, request_id).await;
@@ -550,29 +554,77 @@ enum ArchiveResult {
     NotReadyToArchiveYet,
 }
 
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+enum ArchiveRequestError {
+    Database {
+        source: DbErr,
+    },
+    #[snafu(display("request {request} not found"))]
+    RequestNotFound {
+        request: Uuid,
+    },
+    #[snafu(display("request {request} is missing discord channel id ({discord_channel_id:?}) or message id ({discord_message_id:?})"))]
+    RequestMissingDiscordInfo {
+        request: Uuid,
+        discord_message_id: Option<i64>,
+        discord_channel_id: Option<i64>,
+    },
+    GetDiscordChannelInfo {
+        source: serenity::Error,
+        channel: ChannelId,
+    },
+    DiscordChannelHasNoGuild {
+        channel: ChannelId,
+    },
+    DiscordSendArchivedRequestMessage {
+        source: serenity::Error,
+        channel: ChannelId,
+    },
+    DiscordSendArchivedRequestNotification {
+        source: serenity::Error,
+    },
+    DiscordDeleteRequestMessage {
+        source: serenity::Error,
+    },
+    DiscordEditRequestMessage {
+        source: serenity::Error,
+    },
+}
+
 async fn archive_request_if_required(
     db: &DatabaseConnection,
     request_id: Uuid,
     comp: Option<&MessageComponentInteraction>,
     discord: &impl serenity::http::CacheHttp,
-) -> ArchiveResult {
+) -> Result<ArchiveResult, ArchiveRequestError> {
+    use archive_request_error::*;
     let request = request::Entity::find_by_id(request_id)
         .one(db)
         .await
-        .unwrap()
-        .expect("request not found");
+        .context(DatabaseSnafu)?
+        .context(RequestNotFoundSnafu {
+            request: request_id,
+        })?;
     let (message_id, from_channel) = if let Some(comp) = comp {
         (comp.message.id, comp.channel_id)
     } else {
-        (
-            MessageId(request.discord_message_id.unwrap() as u64),
-            ChannelId(request.discord_channel_id.unwrap() as u64),
-        )
+        let (message_id, channel_id) = (request.discord_message_id.zip(request.discord_channel_id))
+            .context(RequestMissingDiscordInfoSnafu {
+                request: request_id,
+                discord_message_id: request.discord_message_id,
+                discord_channel_id: request.discord_channel_id,
+            })?;
+        (MessageId(message_id as u64), ChannelId(channel_id as u64))
     };
     if request.archived_on.is_some() {
-        return ArchiveResult::AlreadyArchived;
+        return Ok(ArchiveResult::AlreadyArchived);
     }
-    let tasks = request.find_related(task::Entity).all(db).await.unwrap();
+    let tasks = request
+        .find_related(task::Entity)
+        .all(db)
+        .await
+        .context(DatabaseSnafu)?;
     let request_completed = request
         .expires_on
         .map_or(false, |e| e < OffsetDateTime::now_utc())
@@ -581,10 +633,10 @@ async fn archive_request_if_required(
         archive_rule::Entity::find_by_id(from_channel.0 as i64)
             .one(db)
             .await
-            .unwrap()
+            .context(DatabaseSnafu)?
             .map(|rule| ChannelId(rule.to_channel as u64))
     } else {
-        return ArchiveResult::NotReadyToArchiveYet;
+        return Ok(ArchiveResult::NotReadyToArchiveYet);
     };
 
     // mark request as archived
@@ -595,21 +647,27 @@ async fn archive_request_if_required(
     }
     .update(db)
     .await
-    .unwrap();
+    .context(DatabaseSnafu)?;
 
     // try to move request to archive channel, otherwise archive in-place
     if let Some(archive_channel) = archive_channel {
         let archive_channel = archive_channel
             .to_channel(discord)
             .await
-            .unwrap()
+            .context(GetDiscordChannelInfoSnafu {
+                channel: archive_channel,
+            })?
             .guild()
-            .unwrap();
+            .context(DiscordChannelHasNoGuildSnafu {
+                channel: archive_channel,
+            })?;
         let rendered = render_request(db, request_id).await;
         let archived_msg = archive_channel
             .send_message(discord.http(), |msg| rendered.create_message(msg))
             .await
-            .unwrap();
+            .context(DiscordSendArchivedRequestMessageSnafu {
+                channel: archive_channel,
+            })?;
         if let Some(comp) = comp {
             comp.create_interaction_response(discord.http(), |msg| {
                 msg.interaction_response_data(|r| {
@@ -620,19 +678,19 @@ async fn archive_request_if_required(
                 })
             })
             .await
-            .unwrap();
+            .context(DiscordSendArchivedRequestNotificationSnafu)?;
         }
         // apparently the interaction message counts as a followup, which should avoid
         // requiring permission to see the channel
         if let Some(comp) = comp {
             comp.delete_followup_message(&discord.http(), comp.message.id)
                 .await
-                .unwrap();
+                .context(DiscordDeleteRequestMessageSnafu)?;
         } else {
             from_channel
                 .delete_message(&discord.http(), message_id)
                 .await
-                .unwrap();
+                .context(DiscordDeleteRequestMessageSnafu)?;
         }
         request::ActiveModel {
             id: sea_orm::ActiveValue::Unchanged(request_id),
@@ -641,7 +699,7 @@ async fn archive_request_if_required(
         }
         .update(db)
         .await
-        .unwrap();
+        .context(DatabaseSnafu)?;
     } else {
         let rendered = render_request(db, request_id).await;
         if let Some(comp) = comp {
@@ -649,16 +707,16 @@ async fn archive_request_if_required(
                 rendered.create_interaction_response(r)
             })
             .await
-            .unwrap();
+            .context(DiscordEditRequestMessageSnafu)?;
         } else {
             from_channel
                 .edit_message(&discord.http(), message_id, |r| rendered.edit_message(r))
                 .await
-                .unwrap();
+                .context(DiscordEditRequestMessageSnafu)?;
         }
     }
 
-    ArchiveResult::Archived
+    Ok(ArchiveResult::Archived)
 }
 
 #[derive(PartialEq, Eq)]
@@ -671,6 +729,7 @@ enum TaskState {
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<(), snafu::Whatever> {
+    tracing_subscriber::fmt().init();
     let opts = Opts::parse();
     let db = Database::connect(opts.database_url)
         .await
