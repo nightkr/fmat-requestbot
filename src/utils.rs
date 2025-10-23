@@ -1,8 +1,42 @@
-use std::{
-    fmt::Display,
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::borrow::Cow;
+
+/// Returns a string that begins the same as `value`, but is at most `length_limit`
+/// bytes long.
+///
+/// If `value` is too long to fit then it will end with an ellipsis.
+fn ellipsize_string<'a>(value: &'a str, length_limit: usize) -> Cow<'a, str> {
+    const ELLIPSIS: &str = "…";
+    assert!(
+        length_limit >= ELLIPSIS.len(),
+        "length_limit must at least fit the ellipsis ({})",
+        ELLIPSIS.len()
+    );
+
+    if value.len() <= length_limit {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(format!(
+            "{}{ELLIPSIS}",
+            &value[..value.floor_char_boundary(length_limit - ELLIPSIS.len())]
+        ))
+    }
+}
+
+#[test]
+fn test_ellipsize_string() {
+    assert_eq!(ellipsize_string("hey there!", 6), "hey…");
+    assert_eq!(ellipsize_string("hello", 5), "hello");
+    assert_eq!(ellipsize_string("hello", 10), "hello");
+}
+
+/// Ellipsizes a string value to fit within a Discord dropdown interaction.
+pub fn ellipsize_discord_dropdown_value<'a>(value: &'a str) -> Cow<'a, str> {
+    ellipsize_string(
+        value,
+        // taken from https://discord.com/developers/docs/components/reference#string-select-select-option-structure
+        100,
+    )
+}
 
 // pub async fn report_command_result<
 //     E: Display,

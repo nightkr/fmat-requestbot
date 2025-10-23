@@ -1,0 +1,3 @@
+[toolchain]
+# str::floor_char_boundary is *finally* stabilized for 1.91
+channel = "1.91.0-beta.9"

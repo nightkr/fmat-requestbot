@@ -23,7 +23,7 @@ use serde::{de::IntoDeserializer, Deserialize};
 use serenity::{
     builder::{
         CreateComponents, CreateEmbed, CreateInteractionResponse, CreateMessage,
-        EditInteractionResponse, EditMessage,
+        CreateSelectMenuOptions, EditInteractionResponse, EditMessage,
     },
     model::{
         application::{
@@ -45,6 +45,7 @@ use slashery::{
 use snafu::{futures::TryFutureExt as _, OptionExt, Report, ResultExt, Snafu};
 use strum::IntoEnumIterator;
 use time::OffsetDateTime;
+use utils::ellipsize_discord_dropdown_value;
 
 mod expiration_controller;
 mod utils;
@@ -892,19 +893,35 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                 .iter()
                 .copied()
                 .partition::<Vec<_>, _>(|(task, _)| task.started_at.is_some());
+            fn tasks_to_options<'a, 'b, I>(
+                opts: &'a mut CreateSelectMenuOptions,
+                tasks: I,
+            ) -> &'a mut CreateSelectMenuOptions
+            where
+                I: IntoIterator<Item = &'b task::Model>,
+                I::IntoIter: ExactSizeIterator,
+            {
+                // See options in
+                // https://discord.com/developers/docs/components/reference#string-select-string-select-structure
+                const OPTION_LIMIT: usize = 25;
+                for task in tasks.into_iter().take(OPTION_LIMIT) {
+                    opts.create_option(|opt| {
+                        opt.value(task.id)
+                            .label(ellipsize_discord_dropdown_value(&format!(
+                                "{}. {}",
+                                task.weight, task.task
+                            )))
+                    });
+                }
+                opts
+            }
             if !claimed_tasks.is_empty() {
                 components.create_action_row(|row| {
                     row.create_select_menu(|menu| {
                         menu.custom_id(Component::UnclaimTask.component_id())
                             .placeholder("Unclaim task")
                             .options(|opts| {
-                                claimed_tasks.iter().for_each(|(task, _)| {
-                                    opts.create_option(|opt| {
-                                        opt.value(task.id)
-                                            .label(format!("{}. {}", task.weight, task.task))
-                                    });
-                                });
-                                opts
+                                tasks_to_options(opts, claimed_tasks.iter().map(|(task, _)| task))
                             })
                     })
                 });
@@ -915,13 +932,7 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                         menu.custom_id(Component::ClaimTask.component_id())
                             .placeholder("Claim task")
                             .options(|opts| {
-                                unclaimed_tasks.iter().for_each(|(task, _)| {
-                                    opts.create_option(|opt| {
-                                        opt.value(task.id)
-                                            .label(format!("{}. {}", task.weight, task.task))
-                                    });
-                                });
-                                opts
+                                tasks_to_options(opts, unclaimed_tasks.iter().map(|(task, _)| task))
                             })
                     })
                 });
@@ -932,13 +943,10 @@ async fn render_request(db: &DatabaseConnection, request_id: Uuid) -> RenderedRe
                         menu.custom_id(Component::CompleteTask.component_id())
                             .placeholder("Mark task as completed")
                             .options(|opts| {
-                                uncompleted_tasks.iter().for_each(|(task, _)| {
-                                    opts.create_option(|opt| {
-                                        opt.value(task.id)
-                                            .label(format!("{}. {}", task.weight, task.task))
-                                    });
-                                });
-                                opts
+                                tasks_to_options(
+                                    opts,
+                                    uncompleted_tasks.iter().map(|(task, _)| task),
+                                )
                             })
                     })
                 });
